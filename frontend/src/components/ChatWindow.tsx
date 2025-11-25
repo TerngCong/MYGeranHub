@@ -46,15 +46,14 @@ export function ChatWindow({ messages, onSend, isSending }: ChatWindowProps) {
         <input
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
-          placeholder="Type your question…"
+          placeholder="Ask about eligible grants, requirements, or timelines"
           disabled={isSending}
         />
         <button type="submit" disabled={isSending || !draft.trim()}>
-          {isSending ? 'Sending…' : 'Send'}
+          {isSending ? 'Sending...' : 'Send'}
         </button>
       </form>
     </div>
   )
 }
-
 

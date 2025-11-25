@@ -33,37 +33,37 @@ export default function ChatPage() {
   }
 
   if (!profile || !sessionId) {
-    return <LoadingOverlay message="Preparing your workspace…" />
+    return <LoadingOverlay message="Preparing your workspace..." />
   }
 
   return (
-    <div className="chat-layout">
-      <aside>
-        <div className="user-card">
-          <div className="avatar">{avatarLetter}</div>
+    <div className="chat-shell">
+      <section className="chat-surface">
+        <header className="chat-hero">
           <div>
-            <strong>{profile.displayName ?? 'MYGeranHub Member'}</strong>
-            <p>{profile.email ?? 'No email'}</p>
+            <p className="eyebrow">JamAI Copilot</p>
+            <h1>Find the right Malaysian grants faster</h1>
+            <p>Describe your business goals and JamAI will shortlist curated opportunities.</p>
+          </div>
+          <span className="session-chip">Session #{sessionId.slice(0, 8)}</span>
+        </header>
+        <ChatWindow messages={messages} onSend={handleSend} isSending={isSending} />
+      </section>
+
+      <aside className="account-panel">
+        <div className="account-card">
+          <div className="avatar">{avatarLetter}</div>
+          <div className="account-details">
+            <p className="account-name">{profile.displayName ?? 'MYGeranHub Member'}</p>
+            <span className="account-email">{profile.email ?? 'No email available'}</span>
           </div>
         </div>
-        <p className="user-card__hint">Ask anything about available Malaysian government grants.</p>
+        <p className="account-hint">Keep the conversation focused on grants, eligibility, or proposal prep for the clearest answers.</p>
         <button className="secondary-btn" onClick={logout}>
           Sign out
         </button>
         {error ? <span className="chat-error">{error}</span> : null}
       </aside>
-
-      <section>
-        <header>
-          <div>
-            <h1>Grant Copilot</h1>
-            <p>Chat with JamAI to explore curated grant opportunities.</p>
-          </div>
-          <span className="session-pill">Session #{sessionId.slice(0, 8)}</span>
-        </header>
-
-        <ChatWindow messages={messages} onSend={handleSend} isSending={isSending} />
-      </section>
     </div>
   )
 }
