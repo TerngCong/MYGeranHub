@@ -6,33 +6,14 @@ import {
   signOut,
 } from 'firebase/auth'
 import type { User } from 'firebase/auth'
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useState,
-} from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { PropsWithChildren } from 'react'
 
-import { fetchProfile } from '../services/api'
+import { ApiError, fetchProfile } from '../services/api'
 import { firebaseAuth, googleProvider } from '../services/firebase'
 import type { AuthProfile } from '../types/auth'
-
-interface AuthContextValue {
-  user: User | null
-  idToken: string | null
-  profile: AuthProfile | null
-  loading: boolean
-  refreshProfile: () => Promise<AuthProfile | null>
-  loginWithGoogle: () => Promise<void>
-  loginWithEmail: (email: string, password: string) => Promise<void>
-  registerWithEmail: (email: string, password: string) => Promise<void>
-  logout: () => Promise<void>
-}
-
-const AuthContext = createContext<AuthContextValue | undefined>(undefined)
+import { AuthContext } from './authContext'
+import type { AuthContextValue } from './authContext'
 
 export function AuthProvider({ children }: PropsWithChildren) {
   const [user, setUser] = useState<User | null>(null)
@@ -40,7 +21,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [profile, setProfile] = useState<AuthProfile | null>(null)
   const [loading, setLoading] = useState(true)
 
-  const syncProfile = useCallback(async (): Promise<AuthProfile | null> => {
+  const syncProfile = useCallback(async (forceRefresh = false): Promise<AuthProfile | null> => {
     const currentUser = firebaseAuth.currentUser
     if (!currentUser) {
       setProfile(null)
@@ -48,11 +29,32 @@ export function AuthProvider({ children }: PropsWithChildren) {
       return null
     }
 
-    const token = await currentUser.getIdToken()
-    setIdToken(token)
-    const apiProfile = await fetchProfile(token)
-    setProfile(apiProfile)
-    return apiProfile
+    const loadProfile = async (refreshToken: boolean): Promise<AuthProfile> => {
+      const token = await currentUser.getIdToken(refreshToken)
+      const apiProfile = await fetchProfile(token)
+      setIdToken(token)
+      setProfile(apiProfile)
+      return apiProfile
+    }
+
+    try {
+      return await loadProfile(forceRefresh)
+    } catch (error) {
+      const shouldRetry = !forceRefresh && error instanceof ApiError && error.status === 401
+      if (shouldRetry) {
+        try {
+          return await loadProfile(true)
+        } catch (retryError) {
+          setProfile(null)
+          setIdToken(null)
+          throw retryError
+        }
+      }
+
+      setProfile(null)
+      setIdToken(null)
+      throw error
+    }
   }, [])
 
   useEffect(() => {
@@ -69,6 +71,13 @@ export function AuthProvider({ children }: PropsWithChildren) {
         await syncProfile()
       } catch (error) {
         console.error('Unable to sync Firebase profile', error)
+        if (error instanceof ApiError && error.status === 401) {
+          try {
+            await signOut(firebaseAuth)
+          } catch (signOutError) {
+            console.error('Unable to sign out after auth failure', signOutError)
+          }
+        }
       } finally {
         setLoading(false)
       }
@@ -130,13 +139,4 @@ export function AuthProvider({ children }: PropsWithChildren) {
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
-}
-
-export function useAuthContext(): AuthContextValue {
-  const context = useContext(AuthContext)
-  if (!context) {
-    throw new Error('useAuthContext must be used within an AuthProvider')
-  }
-
-  return context
 }

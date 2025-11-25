@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from ..services.chat_table_service import chat_table_service
+from server.services.chat_table_service import chat_table_service
 
 router = APIRouter(prefix="/jamai", tags=["jamai"])
 

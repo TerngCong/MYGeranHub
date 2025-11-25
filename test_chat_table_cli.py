@@ -7,7 +7,7 @@ import argparse
 sys.path.append(os.getcwd())
 
 try:
-    from backend.fastapi.services.chat_table_service import chat_table_service
+    from server.services.chat_table_service import chat_table_service
 except ImportError as e:
     print(f"Error importing service: {e}")
     print("Make sure you are running this script from the root directory of the project (MYGeranHub).")

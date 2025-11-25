@@ -1,23 +1,46 @@
 import httpx
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Tuple
+
 from ..core.config import settings
+
 
 class ChatTableService:
     def __init__(self):
-        self.base_url = settings.jamai_base_url.rstrip("/")
+        self.base_url = settings.jamai_base_url.rstrip("/") if settings.jamai_base_url else None
         self.project_id = settings.jamai_project_id
         self.api_key = settings.jamai_api_key
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        self._headers: Dict[str, str] | None = None
         self.agent_id = "User_Chat_Agent"
+
+    def _ensure_configured(self) -> Tuple[str, Dict[str, str]]:
+        missing = []
+        if not self.base_url:
+            missing.append("JAMAI_BASE_URL")
+        if not self.project_id:
+            missing.append("JAMAI_PROJECT_ID")
+        if not self.api_key:
+            missing.append("JAMAI_API_KEY")
+
+        if missing:
+            missing_vars = ", ".join(missing)
+            raise RuntimeError(
+                f"JamAI integration is not configured. Set the following environment variables: {missing_vars}"
+            )
+
+        if self._headers is None:
+            self._headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            }
+
+        return self.base_url, self._headers
 
     def ensure_agent(self):
         """
         Ensures the fixed User_Chat_Agent table exists.
         """
-        url = f"{self.base_url}/gen_tables/chat"
+        base_url, headers = self._ensure_configured()
+        url = f"{base_url}/gen_tables/chat"
         payload = {
             "id": self.agent_id,
             "cols": [
@@ -60,7 +83,7 @@ class ChatTableService:
         
         try:
             with httpx.Client() as client:
-                response = client.post(url, headers=self.headers, json=payload, timeout=30.0)
+                response = client.post(url, headers=headers, json=payload, timeout=30.0)
                 if response.status_code not in [200, 409]:
                      print(f"Failed to ensure agent {self.agent_id}: {response.text}")
         except Exception as e:
@@ -76,7 +99,8 @@ class ChatTableService:
         table_id = f"{self.agent_id}_{session_id}"
         
         # Use the duplicate endpoint to create a child table
-        url = f"{self.base_url}/gen_tables/chat/duplicate"
+        base_url, headers = self._ensure_configured()
+        url = f"{base_url}/gen_tables/chat/duplicate"
         
         params = {
             "table_id_src": self.agent_id,
@@ -87,7 +111,7 @@ class ChatTableService:
 
         try:
             with httpx.Client() as client:
-                response = client.post(url, headers=self.headers, params=params, timeout=30.0)
+                response = client.post(url, headers=headers, params=params, timeout=30.0)
                 if response.status_code == 200:
                     return response.json()
                 elif response.status_code == 409:
@@ -106,7 +130,8 @@ class ChatTableService:
         Sends a message to the chat table and returns the AI response.
         """
         table_id = f"{self.agent_id}_{session_id}"
-        url = f"{self.base_url}/gen_tables/chat/rows/add"
+        base_url, headers = self._ensure_configured()
+        url = f"{base_url}/gen_tables/chat/rows/add"
         
         payload = {
             "table_id": table_id,
@@ -116,7 +141,7 @@ class ChatTableService:
 
         try:
             with httpx.Client() as client:
-                response = client.post(url, headers=self.headers, json=payload, timeout=60.0)
+                response = client.post(url, headers=headers, json=payload, timeout=60.0)
                 if response.status_code == 200:
                     data = response.json()
                     # Extract AI response from the first row

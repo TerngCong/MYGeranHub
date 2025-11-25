@@ -28,6 +28,11 @@ class Settings:
         self.jamai_base_url: str | None = os.getenv("JAMAI_BASE_URL")
         self.jamai_project_id: str | None = os.getenv("JAMAI_PROJECT_ID")
         self.jamai_api_key: str | None = os.getenv("JAMAI_API_KEY")
+        self.jamai_scrap_result_table_id: str | None = os.getenv("JAMAI_SCRAP_RESULT_TABLE_ID")
+        self.jamai_grants_table_id: str | None = os.getenv("JAMAI_GRANTS_TABLE_ID")
+        self.jamai_knowledge_sync_status_column: str = os.getenv(
+            "JAMAI_KNOWLEDGE_SYNC_STATUS_COL", "knowledge_sync_status"
+        )
         self.frontend_origins: List[str] = _split_env_list("FRONTEND_ORIGINS", "http://localhost:5173")
 
     @property
