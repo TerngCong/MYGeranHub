@@ -26,6 +26,8 @@ class Settings:
         self.firebase_credentials_path: str | None = os.getenv("FIREBASE_CREDENTIALS_PATH")
         self.firebase_credentials_json: str | None = os.getenv("FIREBASE_CREDENTIALS_JSON")
         self.jamai_base_url: str | None = os.getenv("JAMAI_BASE_URL")
+        self.jamai_project_id: str | None = os.getenv("JAMAI_PROJECT_ID")
+        self.jamai_api_key: str | None = os.getenv("JAMAI_API_KEY")
         self.frontend_origins: List[str] = _split_env_list("FRONTEND_ORIGINS", "http://localhost:5173")
 
     @property
