@@ -1,6 +1,6 @@
-from . import auth, chat
+from . import auth
 
-__all__ = ["auth", "chat"]
+__all__ = ["auth"]
 
 
 

@@ -16,7 +16,7 @@ import {
 } from 'react'
 import type { PropsWithChildren } from 'react'
 
-import { ensureChatSession, fetchProfile } from '../services/api'
+import { fetchProfile } from '../services/api'
 import { firebaseAuth, googleProvider } from '../services/firebase'
 import type { AuthProfile } from '../types/auth'
 
@@ -25,7 +25,6 @@ interface AuthContextValue {
   idToken: string | null
   profile: AuthProfile | null
   loading: boolean
-  sessionId: string | null
   refreshProfile: () => Promise<AuthProfile | null>
   loginWithGoogle: () => Promise<void>
   loginWithEmail: (email: string, password: string) => Promise<void>
@@ -39,7 +38,6 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [user, setUser] = useState<User | null>(null)
   const [idToken, setIdToken] = useState<string | null>(null)
   const [profile, setProfile] = useState<AuthProfile | null>(null)
-  const [sessionId, setSessionId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
 
   const syncProfile = useCallback(async (): Promise<AuthProfile | null> => {
@@ -47,7 +45,6 @@ export function AuthProvider({ children }: PropsWithChildren) {
     if (!currentUser) {
       setProfile(null)
       setIdToken(null)
-      setSessionId(null)
       return null
     }
 
@@ -55,8 +52,6 @@ export function AuthProvider({ children }: PropsWithChildren) {
     setIdToken(token)
     const apiProfile = await fetchProfile(token)
     setProfile(apiProfile)
-    const session = await ensureChatSession(token)
-    setSessionId(session.sessionId)
     return apiProfile
   }, [])
 
@@ -66,7 +61,6 @@ export function AuthProvider({ children }: PropsWithChildren) {
       if (!firebaseUser) {
         setProfile(null)
         setIdToken(null)
-        setSessionId(null)
         setLoading(false)
         return
       }
@@ -107,7 +101,6 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const logout = useCallback(async () => {
     await signOut(firebaseAuth)
     setProfile(null)
-    setSessionId(null)
     setIdToken(null)
   }, [])
 
@@ -116,7 +109,6 @@ export function AuthProvider({ children }: PropsWithChildren) {
       user,
       idToken,
       profile,
-      sessionId,
       loading,
       refreshProfile: syncProfile,
       loginWithGoogle,
@@ -128,7 +120,6 @@ export function AuthProvider({ children }: PropsWithChildren) {
       user,
       idToken,
       profile,
-      sessionId,
       loading,
       syncProfile,
       loginWithGoogle,
@@ -149,4 +140,3 @@ export function useAuthContext(): AuthContextValue {
 
   return context
 }
-

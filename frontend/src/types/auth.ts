@@ -4,6 +4,3 @@ export interface AuthProfile {
   displayName?: string | null
   photoUrl?: string | null
 }
-
-
-

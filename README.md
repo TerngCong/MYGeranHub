@@ -23,6 +23,3 @@ MYGeranHub helps Malaysian founders discover grants via a JamAI-powered backend 
 3. Start the dev server: `npm run dev`
 
 The frontend expects the backend to be available at `VITE_API_BASE_URL` (default `http://localhost:8000`).
-
-
-

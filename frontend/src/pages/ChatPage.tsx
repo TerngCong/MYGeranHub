@@ -1,38 +1,14 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo } from 'react'
 
 import { LoadingOverlay } from '../components/LoadingOverlay'
-import { ChatWindow } from '../components/ChatWindow'
 import { useAuth } from '../hooks/useAuth'
-import { sendChatMessage } from '../services/api'
-import type { ChatMessage } from '../types/chat'
 
 export default function ChatPage() {
-  const { profile, idToken, sessionId, logout } = useAuth()
-  const [messages, setMessages] = useState<ChatMessage[]>([])
-  const [isSending, setIsSending] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const { profile, logout } = useAuth()
 
   const avatarLetter = useMemo(() => profile?.displayName?.[0]?.toUpperCase() ?? profile?.email?.[0]?.toUpperCase() ?? 'U', [profile])
 
-  useEffect(() => {
-    setMessages([])
-  }, [sessionId])
-
-  const handleSend = async (prompt: string) => {
-    if (!idToken) return
-    setIsSending(true)
-    setError(null)
-    try {
-      const response = await sendChatMessage(idToken, { prompt, sessionId: sessionId ?? undefined })
-      setMessages(response.messages)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to send message')
-    } finally {
-      setIsSending(false)
-    }
-  }
-
-  if (!profile || !sessionId) {
+  if (!profile) {
     return <LoadingOverlay message="Preparing your workspace..." />
   }
 
@@ -45,9 +21,13 @@ export default function ChatPage() {
             <h1>Find the right Malaysian grants faster</h1>
             <p>Describe your business goals and JamAI will shortlist curated opportunities.</p>
           </div>
-          <span className="session-chip">Session #{sessionId.slice(0, 8)}</span>
         </header>
-        <ChatWindow messages={messages} onSend={handleSend} isSending={isSending} />
+        <div className="chat-window chat-placeholder">
+          <div className="chat-empty">
+            <h3>Live chat is getting an upgrade</h3>
+            <p>JamAI Copilot is temporarily offline while we refactor the experience. Check back soon for the new flow.</p>
+          </div>
+        </div>
       </section>
 
       <aside className="account-panel">
@@ -62,11 +42,7 @@ export default function ChatPage() {
         <button className="secondary-btn" onClick={logout}>
           Sign out
         </button>
-        {error ? <span className="chat-error">{error}</span> : null}
       </aside>
     </div>
   )
 }
-
-
-
