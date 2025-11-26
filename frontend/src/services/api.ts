@@ -37,3 +37,23 @@ async function request<T>(
 export async function fetchProfile(idToken: string): Promise<AuthProfile> {
   return request<AuthProfile>('/auth/profile', { method: 'GET' }, idToken)
 }
+
+export interface ChatResponse {
+  status?: string
+  message?: string[]
+  payload?: string
+  response?: string // for backward compatibility
+}
+
+export async function sendChatMessage(idToken: string, message: string): Promise<ChatResponse> {
+  return request<ChatResponse>('/jamai/message', {
+    method: 'POST',
+    body: JSON.stringify({ message }),
+  }, idToken)
+}
+
+export async function resetChatSession(idToken: string): Promise<void> {
+  await request('/jamai/reset', {
+    method: 'POST',
+  }, idToken)
+}

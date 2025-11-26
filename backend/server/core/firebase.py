@@ -44,8 +44,9 @@ def _ensure_firebase_app() -> firebase_admin.App:
 def verify_id_token(token: str) -> FirebaseUser:
     try:
         _ensure_firebase_app()
-        decoded = firebase_auth.verify_id_token(token)
+        decoded = firebase_auth.verify_id_token(token, clock_skew_seconds=10)
     except Exception as exc:
+        print(f"Firebase token verification failed: {exc}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired Firebase ID token.",
