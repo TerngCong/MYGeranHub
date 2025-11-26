@@ -1,9 +1,12 @@
 import json
-from typing import Any, Dict, List, Optional
+import logging
+from typing import Any, Dict, List, Optional, Set
 
 import httpx
 
 from ..core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class RowSkip(Exception):
@@ -30,6 +33,7 @@ class GrantSyncService:
         self.scrap_table_id = settings.jamai_scrap_result_table_id
         self.grants_table_id = settings.jamai_grants_table_id
         self.sync_status_column = settings.jamai_knowledge_sync_status_column
+        self.knowledge_embedding_model = settings.jamai_knowledge_embedding_model
         self.headers = {
             "Authorization": f"Bearer {self.api_key}" if self.api_key else "",
             "Content-Type": "application/json",
@@ -37,6 +41,8 @@ class GrantSyncService:
         if self.project_id:
             self.headers["X-PROJECT-ID"] = self.project_id
         self._api_prefix = "/api/v2"
+        self._action_table_columns: Set[str] | None = None
+        self._knowledge_table_ready = False
 
     def _ensure_configuration(self) -> None:
         missing: List[str] = []
@@ -50,6 +56,8 @@ class GrantSyncService:
             missing.append("JAMAI_SCRAP_RESULT_TABLE_ID")
         if not self.grants_table_id:
             missing.append("JAMAI_GRANTS_TABLE_ID")
+        if not self.knowledge_embedding_model:
+            missing.append("JAMAI_KNOWLEDGE_EMBEDDING_MODEL")
 
         if missing:
             raise RuntimeError(f"Missing JamAI configuration values: {', '.join(missing)}")
@@ -70,8 +78,22 @@ class GrantSyncService:
             raise RuntimeError("JamAI API key is not configured")
 
         with httpx.Client(timeout=timeout) as client:
-            response = client.request(method, url, headers=headers, params=params, json=json_payload)
-            response.raise_for_status()
+            try:
+                response = client.request(
+                    method, url, headers=headers, params=params, json=json_payload
+                )
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:  # noqa: PERF203
+                detail: str
+                try:
+                    detail = json.dumps(exc.response.json())
+                except ValueError:
+                    detail = exc.response.text
+                raise RuntimeError(
+                    f"JamAI API error {exc.response.status_code} for "
+                    f"{exc.request.method} {exc.request.url}: {detail}"
+                ) from exc
+
             if response.content:
                 return response.json()
             return {}
@@ -90,12 +112,263 @@ class GrantSyncService:
 
         return f"{base}{self._api_prefix}{normalized_path}"
 
+    def _normalize_rows(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        raw_rows = data.get("rows")
+        if raw_rows is None:
+            raw_rows = data.get("items")
+
+        normalized: List[Dict[str, Any]] = []
+        if not isinstance(raw_rows, list):
+            return normalized
+
+        for raw_row in raw_rows:
+            if not isinstance(raw_row, dict):
+                continue
+            row_id = raw_row.get("id") or raw_row.get("ID") or raw_row.get("row_id")
+            columns = raw_row.get("columns")
+            if columns is None:
+                columns = {
+                    key: value
+                    for key, value in raw_row.items()
+                    if key not in {"id", "ID", "row_id", "Updated at", "updated_at"}
+                }
+
+            normalized.append(
+                {
+                    "id": row_id,
+                    "columns": columns or {},
+                }
+            )
+        return normalized
+
+    def _fetch_action_table_columns(self) -> Set[str]:
+        if self._action_table_columns is not None:
+            return self._action_table_columns
+
+        data = self._request(
+            "GET",
+            "/gen_tables/action",
+            params={"table_id": self.scrap_table_id},
+        )
+
+        raw_cols = (
+            data.get("cols")
+            or data.get("columns")
+            or (data.get("table") or {}).get("cols")
+            or (data.get("table") or {}).get("columns")
+        )
+
+        columns: Set[str] = set()
+        if isinstance(raw_cols, list):
+            for col in raw_cols:
+                if isinstance(col, dict):
+                    col_id = col.get("id") or col.get("name")
+                    if col_id:
+                        columns.add(str(col_id))
+
+        if not columns:
+            raise RuntimeError(
+                f"Unable to fetch columns for JamAI action table '{self.scrap_table_id}'."
+            )
+
+        self._action_table_columns = columns
+        return columns
+
+    def _get_table_metadata(self, table_type: str, table_id: str) -> Optional[Dict[str, Any]]:
+        url = self._compose_url(f"/gen_tables/{table_type}")
+        params = {"table_id": table_id}
+        headers = self.headers
+
+        with httpx.Client(timeout=30.0) as client:
+            response = client.get(url, headers=headers, params=params)
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            return response.json()
+
+    def _ensure_sync_status_column(self) -> None:
+        if not self.sync_status_column:
+            raise RuntimeError("JamAI sync status column is not configured")
+
+        columns = self._fetch_action_table_columns()
+        if self.sync_status_column in columns:
+            return
+
+        logger.info(
+            "Adding JamAI column '%s' to action table '%s'.",
+            self.sync_status_column,
+            self.scrap_table_id,
+        )
+        payload = {
+            "id": self.scrap_table_id,
+            "cols": [
+                {
+                    "id": self.sync_status_column,
+                    "dtype": "str",
+                }
+            ],
+        }
+        self._request(
+            "POST",
+            "/gen_tables/action/columns/add",
+            json_payload=payload,
+            timeout=60.0,
+        )
+        self._action_table_columns = None
+        columns = self._fetch_action_table_columns()
+        if self.sync_status_column not in columns:
+            raise RuntimeError(
+                f"Failed to verify that column '{self.sync_status_column}' exists on action table "
+                f"'{self.scrap_table_id}'."
+            )
+
+    def _ensure_knowledge_table(self) -> None:
+        if self._knowledge_table_ready:
+            return
+        if not self.grants_table_id:
+            raise RuntimeError("JAMAI_GRANTS_TABLE_ID is not configured")
+
+        metadata = self._get_table_metadata("knowledge", self.grants_table_id)
+        if metadata is None:
+            self._create_knowledge_table()
+            metadata = self._get_table_metadata("knowledge", self.grants_table_id)
+            if metadata is None:
+                raise RuntimeError(
+                    f"Failed to fetch JamAI knowledge table metadata for '{self.grants_table_id}'."
+                )
+
+        self._ensure_knowledge_schema(metadata)
+        self._knowledge_table_ready = True
+
+    def _create_knowledge_table(self) -> None:
+        logger.info(
+            "Creating JamAI knowledge table '%s' with default schema.",
+            self.grants_table_id,
+        )
+        payload = {
+            "id": self.grants_table_id,
+            "cols": [
+                {"id": "grant_period", "dtype": "str"},
+                {"id": "document_required", "dtype": "str"},
+            ],
+            "embedding_model": self.knowledge_embedding_model,
+        }
+        self._request(
+            "POST",
+            "/gen_tables/knowledge",
+            json_payload=payload,
+            timeout=60.0,
+        )
+
+    def _extract_column_ids(self, metadata: Dict[str, Any]) -> Set[str]:
+        table = metadata.get("table") or {}
+        raw_cols = (
+            metadata.get("cols")
+            or metadata.get("columns")
+            or table.get("cols")
+            or table.get("columns")
+        )
+
+        columns: Set[str] = set()
+        if isinstance(raw_cols, list):
+            for col in raw_cols:
+                if isinstance(col, dict):
+                    col_id = col.get("id") or col.get("name")
+                    if col_id:
+                        columns.add(str(col_id))
+        return columns
+
+    def _ensure_knowledge_schema(self, metadata: Dict[str, Any]) -> None:
+        """Align default JamAI columns with our domain-specific schema."""
+        columns = self._extract_column_ids(metadata)
+
+        def refresh_metadata() -> Dict[str, Any]:
+            refreshed = self._get_table_metadata("knowledge", self.grants_table_id)
+            if refreshed is None:
+                raise RuntimeError(
+                    f"Failed to refresh knowledge table metadata for '{self.grants_table_id}'."
+                )
+            return refreshed
+
+        def ensure_columns_cache(updated_metadata: Dict[str, Any]) -> Dict[str, Any]:
+            nonlocal columns
+            columns = self._extract_column_ids(updated_metadata)
+            return updated_metadata
+
+        text_columns = [
+            ("grant_name", "str"),
+            ("grant_description", "str"),
+            ("eligibility_criteria", "str"),
+            ("application_steps", "str"),
+            ("grant_period", "str"),
+            ("document_required", "str"),
+        ]
+        add_ops: List[Dict[str, Any]] = []
+        for column_id, dtype in text_columns:
+            if column_id not in columns:
+                add_ops.append({"id": column_id, "dtype": dtype})
+        if add_ops:
+            payload = {
+                "id": self.grants_table_id,
+                "table_id": self.grants_table_id,
+                "cols": add_ops,
+            }
+            self._request(
+                "POST",
+                "/gen_tables/knowledge/columns/add",
+                json_payload=payload,
+                timeout=60.0,
+            )
+            metadata = ensure_columns_cache(refresh_metadata())
+
+        columns = self._extract_column_ids(metadata)
+
+        embed_columns = [
+            ("grant_name_embed", "grant_name"),
+            ("grant_description_embed", "grant_description"),
+            ("grant_period_embed", "grant_period"),
+            ("eligibility_criteria_embed", "eligibility_criteria"),
+            ("application_steps_embed", "application_steps"),
+            ("document_required_embed", "document_required"),
+        ]
+        embed_ops: List[Dict[str, Any]] = []
+        for embed_id, source_column in embed_columns:
+            if embed_id in columns:
+                continue
+            embed_ops.append(
+                {
+                    "id": embed_id,
+                    "dtype": "float",
+                    "vlen": 1024,
+                    "gen_config": {
+                        "object": "gen_config.embed",
+                        "embedding_model": self.knowledge_embedding_model,
+                        "source_column": source_column,
+                    },
+                }
+            )
+        if embed_ops:
+            payload = {
+                "id": self.grants_table_id,
+                "table_id": self.grants_table_id,
+                "cols": embed_ops,
+            }
+            self._request(
+                "POST",
+                "/gen_tables/knowledge/columns/add",
+                json_payload=payload,
+                timeout=60.0,
+            )
+            ensure_columns_cache(refresh_metadata())
+
+
     def sync_pending_grants(self, limit: int = 20) -> Dict[str, int]:
         """
         Fetches pending rows from the action table, pushes approved grants into the knowledge
         table, and marks the processed rows with the sync status.
         """
         self._ensure_configuration()
+        self._ensure_sync_status_column()
         limit = max(1, min(limit, 100))
         rows = self._list_pending_rows(limit=limit)
 
@@ -142,16 +415,9 @@ class GrantSyncService:
         return summary
 
     def _list_pending_rows(self, limit: int) -> List[Dict[str, Any]]:
-        where_clause = (
-            '"grant_final" IS NOT NULL AND '
-            '"grant_decider" = \'proceed to knowledge table sync\' AND '
-            f'("{self.sync_status_column}" IS NULL OR "{self.sync_status_column}" != \'synced\')'
-        )
-
         params = {
             "table_id": self.scrap_table_id,
             "limit": limit,
-            "where": where_clause,
         }
 
         data = self._request(
@@ -159,10 +425,51 @@ class GrantSyncService:
             "/gen_tables/action/rows/list",
             params=params,
         )
-        return data.get("rows", [])
+        rows = self._normalize_rows(data)
+        filtered_rows: List[Dict[str, Any]] = []
+        status_updates: Dict[str, Dict[str, str]] = {}
+        for row in rows:
+            columns = row.get("columns", {})
+            row_id = self._extract_row_id(row)
+            decider_value = self._normalize_text(self._extract_column_value(columns, "grant_decider"))
+            if not decider_value:
+                continue
+
+            if decider_value.lower() != "proceed to knowledge table sync":
+                current_status = self._extract_column_value(columns, self.sync_status_column)
+                if not current_status:
+                    status_updates[row_id] = {
+                        self.sync_status_column: self._truncate_status(
+                            f"failed: grant_decider={decider_value}"
+                        )
+                    }
+                continue
+
+            if not self._should_consider_row(columns):
+                continue
+            filtered_rows.append(row)
+
+        if status_updates:
+            self._update_action_rows(status_updates)
+
+        return filtered_rows
+
+    def _should_consider_row(self, columns: Dict[str, Any]) -> bool:
+        status = self._extract_column_value(columns, self.sync_status_column)
+        if isinstance(status, str) and status.strip().lower() == "synced":
+            return False
+
+        grant_final_raw = self._extract_column_value(columns, "grant_final")
+        if grant_final_raw is None:
+            return False
+        if isinstance(grant_final_raw, str) and not grant_final_raw.strip():
+            return False
+        if isinstance(grant_final_raw, str) and grant_final_raw.strip().lower() == "failed to verify":
+            return False
+        return True
 
     def _extract_row_id(self, row: Dict[str, Any]) -> str:
-        row_id = row.get("id") or row.get("row_id")
+        row_id = row.get("id") or row.get("ID") or row.get("row_id")
         if not row_id:
             raise RuntimeError("Row payload missing 'id'")
         return str(row_id)
@@ -244,6 +551,13 @@ class GrantSyncService:
             "document_required": self._format_required_documents(required_documents_section),
         }
 
+        title_value = knowledge_row.get("grant_name")
+        description_value = knowledge_row.get("grant_description")
+        if title_value:
+            knowledge_row["Title"] = title_value
+        if description_value:
+            knowledge_row["Text"] = description_value
+
         return knowledge_row
 
     def _first_non_empty(self, *candidates: Optional[str]) -> Optional[str]:
@@ -322,6 +636,7 @@ class GrantSyncService:
         return self._extract_text(section)
 
     def _insert_knowledge_row(self, payload: Dict[str, Optional[str]]) -> None:
+        self._ensure_knowledge_table()
         json_payload = {
             "table_id": self.grants_table_id,
             "data": [payload],

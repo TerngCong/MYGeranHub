@@ -38,6 +38,7 @@ class Settings:
         self.jamai_knowledge_sync_status_column: str = os.getenv(
             "JAMAI_KNOWLEDGE_SYNC_STATUS_COL", "knowledge_sync_status"
         )
+        self.jamai_knowledge_embedding_model: str | None = os.getenv("JAMAI_KNOWLEDGE_EMBEDDING_MODEL")
         self.frontend_origins: List[str] = _split_env_list("FRONTEND_ORIGINS", "http://localhost:5173")
 
     @property
@@ -51,6 +52,3 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
-
-
-

@@ -27,7 +27,9 @@ The frontend expects the backend to be available at `VITE_API_BASE_URL` (default
 ## Grant Sync Workflow
 
 - The `grant_decider` LLM prompt lives in `backend/agents/prompts/grant_decider_prompt.md`. Copy the template (including model settings) into the JamAI Action Table column configuration.
-- The Action Table (`scrap_result`) needs a plain text column named `knowledge_sync_status` (or any name configured via `JAMAI_KNOWLEDGE_SYNC_STATUS_COL`). Initialize new rows with `pending`.
+- The Action Table (`scrap_result`) needs a plain text column named `knowledge_sync_status` (or any name configured via `JAMAI_KNOWLEDGE_SYNC_STATUS_COL`). The backend will auto-create it if missing, but seeding it yourself (default `pending`) keeps JamAI’s schema tidy.
+- JamAI’s Action Table APIs sometimes return rows under `items` and wrap each cell inside `{ "value": ... }`. The backend now normalizes these responses automatically, but if you query them manually you’ll need to look under `items[].<column>.value`.
+- The sync worker will auto-provision the `grants` knowledge table (with `grant_name`, `grant_period`, `grant_description`, `eligibility_criteria`, `application_steps`, `document_required`) if it doesn’t already exist, so you only need to configure the table ID and embedding model.
 - `grant_final` must either contain the verified JSON schema `{grantName, period, grantDescription, applicationProcess, requiredDocuments}` or the literal string `failed to verify`.
 
 ### Required environment variables
@@ -40,6 +42,7 @@ Set these values inside `backend/.env`:
 - `JAMAI_SCRAP_RESULT_TABLE_ID` (defaults to `scrap_result`)
 - `JAMAI_GRANTS_TABLE_ID` (defaults to `grants`)
 - `JAMAI_KNOWLEDGE_SYNC_STATUS_COL` (defaults to `knowledge_sync_status`)
+- `JAMAI_KNOWLEDGE_EMBEDDING_MODEL` (required for knowledge table creation; e.g., `ellm/text-embedding-3-large`)
 
 ### Syncing verified grants
 
