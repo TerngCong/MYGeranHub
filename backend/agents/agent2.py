@@ -16,7 +16,7 @@ MODEL_NAME = "o4-mini"
 
 JAMAI_PROJECT_ID = os.getenv("JAMAI_PROJECT_ID")
 JAMAI_PAT = os.getenv("JAMAI_PAT")
-TABLE_ID = "scrape_result"
+TABLE_ID = "scrap_result"
 if not JAMAI_PROJECT_ID or not JAMAI_PAT:
     raise ValueError("JamAI sucks")
 jamai = JamAI(
@@ -26,22 +26,40 @@ jamai = JamAI(
 
 def verify_claim(text, url):
     prompt = f"""
-You are a grant fact-checker. Verify the following grant detail using ONLY the content from the URL.
+You are a grant fact-checker. Verify the following grant detail using ONLY information from the URL.
 
 URL: {url}
 
 Claim to verify:
 {text}
 
-Return ONLY a JSON object. No markdown. No backticks. The JSON must contain the following:
-- "is_accurate": true/false/unknown
-- "explanation": explanation of match / mismatch
-- "evidence": quotes or sections from the page
+Return ONLY a JSON object with these exact fields:
+ - "is_accurate": true/false/unknown,
+ - "explanation": "text",
+ - "evidence": ["list", "of", "quotes"]
+
+Remember:
+- Output ONLY valid JSON
+- Never add commentary
+- Never add markdown
+- Never add backticks
 """
     response = client.chat.completions.create(
         model=MODEL_NAME,
         messages=[
-            {"role": "system", "content":  "You are a grant fact-checking AI. You MUST respond with ONLY valid JSON. Do NOT include markdown. Do NOT include explanations outside JSON. Do NOT wrap the JSON in backticks. Do NOT add extra text. Output ONLY a valid JSON object."},
+            {"role": "system", "content": f"""
+You are a grant fact-checking AI. 
+You MUST output ONLY valid JSON.
+The JSON must be a single object and MUST follow strict JSON rules:
+- No trailing commas
+- No unescaped quotes
+- All strings must use double quotes
+- No markdown
+- No backticks
+- No explanation outside the JSON
+Do NOT output anything except valid JSON.
+"""  
+            },
             {"role": "user", "content": prompt}
         ]
     )
@@ -245,8 +263,8 @@ def fetch_pav_output(row_id):
         )
 
         if response.items:
-            print(f"Row retrieved successfully. {response["grant_scrape"]["value"]}")
-            return response["grant_scrape"]["value"], response["ID"]
+            print(f"Row retrieved successfully. {response["grant_scrap"]["value"]}")
+            return response["grant_scrap"]["value"], response["ID"]
         else:
             print("The table is empty.")
             return None
@@ -316,15 +334,16 @@ def main_things_to_run():
         grant_final(data_id, cleaned_input, result)
 
 if __name__ == "__main__":
-    while True:
-        now = datetime.now()
+    main_things_to_run()
+    # while True:
+    #     now = datetime.now()
 
-        if now.hour == 4 and now.minute == 0:
-            print("It's time")
-            main_things_to_run()
+    #     if now.hour == 4 and now.minute == 0:
+    #         print("It's time")
+    #         main_things_to_run()
 
-            time.sleep(61)
-            print("Wait for tmr")
+    #         time.sleep(61)
+    #         print("Wait for tmr")
         
-        else:
-            time.sleep(15)
+    #     else:
+    #         time.sleep(15)
