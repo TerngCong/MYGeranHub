@@ -10,5 +10,3 @@ export function LoadingOverlay({ message = 'Loading…' }: LoadingOverlayProps) 
     </div>
   )
 }
-
-
