@@ -71,42 +71,18 @@ class WebScraperAgent:
             
             logging.info(f"📋 Found {len(grant_names)} grants for processing")
             
-            # Step 2: Get existing grants to avoid duplicates
-            existing_grants = self.jamai_client.get_grants_from_table()
-            existing_grant_names = self._get_existing_grant_names(existing_grants)
-            logging.info(f"📊 Found {len(existing_grant_names)} existing grants in table")
+            # Step 2: Sequential scraping for all grants
+            scraped_grants = self._sequential_scraping(grant_names)
             
-            # Step 3: Filter out existing grants
-            new_grant_names = [name for name in grant_names if name not in existing_grant_names]
-            
-            if not new_grant_names:
-                logging.info("✅ All grants already exist in table, no new grants to scrape")
-                return []
-            
-            logging.info(f"🆕 Found {len(new_grant_names)} new grants to scrape")
-            
-            # Step 4: Sequential scraping only for new grants
-            scraped_grants = self._sequential_scraping(new_grant_names)
-            
-            # Step 5: Convert to grant entries
+            # Step 3: Convert to grant entries
             grant_entries = self._create_grant_entries(scraped_grants)
             
-            logging.info(f"✅ Web search completed. Found {len(grant_entries)} new grants")
+            logging.info(f"✅ Web search completed. Found {len(grant_entries)} grants")
             return grant_entries
             
         except Exception as e:
             logging.error(f"❌ Web search failed: {e}")
             return []
-
-    def _get_existing_grant_names(self, existing_grants: List[Dict]) -> List[str]:
-        """Extract grant names from existing grants to avoid duplicates"""
-        existing_names = []
-        for grant in existing_grants:
-            grant_data = grant.get("grant_scrap", {})
-            grant_name = grant_data.get("grantName", {}).get("value", "").strip()
-            if grant_name:
-                existing_names.append(grant_name)
-        return existing_names
 
     def _get_comprehensive_grant_list(self) -> List[str]:
         """Get a comprehensive list of Malaysian grant names with limit"""
@@ -414,53 +390,139 @@ class JamAIBaseClient:
         # Use the globally initialized jamai client
         self.client = jamai
     
-    def add_grant_entries_to_scrap_result_table(self, grant_entries: List[GrantEntry]) -> bool:
+    def add_or_update_grant_entries(self, grant_entries: List[GrantEntry]) -> Dict[str, Any]:
         """
-        Add grant entries to JamAIBase scrap_result table using proper SDK methods
+        Add or update grant entries in JamAIBase scrap_result table
+        Only deletes and replaces existing grants, keeps other grants intact
         """
         if not self.client:
             logging.error("❌ JamAI client not initialized")
-            return False
+            return {"success": False, "added": 0, "updated": 0}
             
         try:
-            # Prepare data for JamAIBase table
+            # Step 1: Get all existing grants
+            existing_grants = self.get_grants_from_table()
+            existing_grant_map = {}  # Map grant name to grant info
+            
+            for grant in existing_grants:
+                grant_data = grant.get("grant_scrap", {})
+                grant_name = grant_data.get("grantName", {}).get("value", "").strip()
+                if grant_name:
+                    existing_grant_map[grant_name.lower()] = grant
+            
+            logging.info(f"📊 Found {len(existing_grant_map)} existing grants in table")
+            
+            # Step 2: Identify which grants need to be updated vs added
+            grants_to_delete = []  # Existing grants that need to be replaced
+            grants_to_add = []     # New grants to add
+            updated_count = 0
+            
+            for entry in grant_entries:
+                grant_data = json.loads(entry.grant_scrap)
+                grant_name = grant_data.get("grantName", {}).get("value", "").strip()
+                
+                if not grant_name:
+                    logging.warning(f"⚠️ Skipping entry with empty grant name: {entry.id}")
+                    continue
+                
+                if grant_name.lower() in existing_grant_map:
+                    # This grant already exists, mark the old one for deletion
+                    existing_grant = existing_grant_map[grant_name.lower()]
+                    grants_to_delete.append(existing_grant["id"])
+                    grants_to_add.append(entry)  # Add the new version
+                    updated_count += 1
+                    logging.info(f"🔄 Will replace existing grant: {grant_name}")
+                else:
+                    # This is a new grant
+                    grants_to_add.append(entry)
+                    logging.info(f"✅ Will add new grant: {grant_name}")
+            
+            # Step 3: Delete only the existing grants that need to be replaced
+            if grants_to_delete:
+                logging.info(f"🗑️ Deleting {len(grants_to_delete)} existing grants to be replaced...")
+                delete_success = self._delete_specific_grants(grants_to_delete)
+                if not delete_success:
+                    logging.error("❌ Failed to delete existing grants")
+                    return {"success": False, "added": 0, "updated": 0}
+            else:
+                logging.info("📭 No existing grants to delete")
+            
+            # Step 4: Add all new and updated grants
+            added_count = 0
+            if grants_to_add:
+                added_count = self._add_new_grants(grants_to_add)
+                logging.info(f"✅ Added {added_count} grants to table")
+            
+            logging.info(f"📊 Grant processing completed: {added_count} added, {updated_count} grants updated")
+            return {
+                "success": True,
+                "added": added_count,
+                "updated": updated_count,
+                "total_processed": added_count
+            }
+                        
+        except Exception as e:
+            logging.error(f"❌ Error processing grants in JamAIBase: {e}")
+            return {"success": False, "added": 0, "updated": 0}
+
+    def _delete_specific_grants(self, grant_ids: List[str]) -> bool:
+        """Delete specific grants from the table by their IDs"""
+        try:
+            if not grant_ids:
+                logging.info("📭 No grants to delete")
+                return True
+            
+            logging.info(f"🗑️ Deleting {len(grant_ids)} specific grants...")
+            
+            # Delete specific rows
+            response = self.client.table.delete_table_rows(
+                "action",
+                t.RowDeleteRequest(
+                    table_id="scrap_result",
+                    row_ids=grant_ids,
+                ),
+            )
+            
+            if response.ok:
+                logging.info(f"✅ Successfully deleted {len(grant_ids)} grants")
+                return True
+            else:
+                logging.error("❌ Failed to delete grants")
+                return False
+                
+        except Exception as e:
+            logging.error(f"❌ Error deleting specific grants: {e}")
+            return False
+
+    def _add_new_grants(self, grant_entries: List[GrantEntry]) -> int:
+        """Add new grants to the table in batch"""
+        try:
             rows_data = []
             for entry in grant_entries:
                 row_data = {
                     "id": entry.id,
                     "updated_at": entry.updated_at,
-                    "grant_scrap": entry.grant_scrap,  # Already a JSON string
+                    "grant_scrap": entry.grant_scrap,
                     "status": entry.status
                 }
                 rows_data.append(row_data)
             
-            # Use JamAIBase SDK method for adding rows (non-streaming)
             completion = self.client.table.add_table_rows(
                 "action",
                 t.MultiRowAddRequest(
-                    table_id="scrap_result",  # Using scrap_result as table_id
+                    table_id="scrap_result",
                     data=rows_data,
-                    stream=False  # Non-streaming for bulk operations
+                    stream=False
                 ),
             )
             
-            logging.info(f"✅ Successfully added {len(grant_entries)} grants to JamAIBase scrap_result table")
-            logging.info(f"📊 Added rows: {len(completion.rows)}")
-            
-            # Verify the data was actually added by checking the content
-            for row in completion.rows:
-                if hasattr(row, 'columns') and 'grant_scrap' in row.columns:
-                    grant_scrap_value = row.columns['grant_scrap']
-                    if grant_scrap_value and hasattr(grant_scrap_value, 'text'):
-                        logging.info(f"📝 Verified grant data added: {grant_scrap_value.text[:100]}...")
-                    elif grant_scrap_value and isinstance(grant_scrap_value, dict):
-                        logging.info(f"📝 Verified grant data added (dict): {str(grant_scrap_value)[:100]}...")
-            
-            return True
+            added_count = len(completion.rows)
+            logging.info(f"✅ Added {added_count} grants to table")
+            return added_count
                         
         except Exception as e:
-            logging.error(f"❌ Error adding grants to JamAIBase: {e}")
-            return False
+            logging.error(f"❌ Error adding new grants: {e}")
+            return 0
 
     def get_grants_from_table(self) -> List[Dict]:
         """Get all grants from scrap_result table using proper SDK method"""
@@ -498,9 +560,6 @@ class JamAIBaseClient:
                     "status": row.get("status", "active")
                 }
                 grants.append(grant_info)
-                
-                grant_name = grant_data.get('grantName', {}).get('value', 'Unknown')
-                logging.info(f"📋 Retrieved grant: {grant_info['id']} - {grant_name}")
             
             logging.info(f"📋 Retrieved {len(grants)} grants from scrap_result table")
             return grants
@@ -509,50 +568,6 @@ class JamAIBaseClient:
             logging.error(f"❌ Error getting grants from table: {e}")
             return []
 
-    def update_grant_in_table(self, grant_id: str, updated_data: Dict, status: str = "validated") -> bool:
-        """Update a single grant in the scrap_result table using proper SDK method"""
-        if not self.client:
-            logging.error("❌ JamAI client not initialized")
-            return False
-            
-        try:
-            # Convert updated_data to JSON string for the grant_scrap column
-            updated_data_json = json.dumps(updated_data, ensure_ascii=False)
-            
-            # Prepare update data
-            update_data = {
-                "id": grant_id,
-                "grant_scrap": updated_data_json,  # Store as JSON string
-                "updated_at": datetime.now(pytz.timezone('Asia/Kuala_Lumpur')).isoformat(),
-                "status": status
-            }
-            
-            # Use JamAIBase SDK method for updating rows
-            completion = self.client.table.update_table_rows(
-                "action",
-                t.MultiRowUpdateRequest(
-                    table_id="scrap_result",
-                    data=[update_data]
-                ),
-            )
-            
-            logging.info(f"✅ Successfully updated grant: {grant_id}")
-            
-            # Verify the update
-            for row in completion.rows:
-                if hasattr(row, 'columns') and 'grant_scrap' in row.columns:
-                    grant_scrap_value = row.columns['grant_scrap']
-                    if grant_scrap_value and hasattr(grant_scrap_value, 'text'):
-                        logging.info(f"📝 Verified grant data updated: {grant_scrap_value.text[:100]}...")
-                    elif grant_scrap_value and isinstance(grant_scrap_value, dict):
-                        logging.info(f"📝 Verified grant data updated (dict): {str(grant_scrap_value)[:100]}...")
-            
-            return True
-                
-        except Exception as e:
-            logging.error(f"❌ Error updating grant {grant_id}: {e}")
-            return False
-
     def find_grant_by_name(self, grant_name: str) -> Optional[Dict]:
         """Find an existing grant by name to avoid duplicates"""
         try:
@@ -560,170 +575,11 @@ class JamAIBaseClient:
             for grant in grants:
                 grant_data = grant.get("grant_scrap", {})
                 existing_name = grant_data.get("grantName", {}).get("value", "").strip()
-                if existing_name.lower() == grant_name.lower():
+                if existing_name and existing_name.lower() == grant_name.lower():
                     return grant
             return None
         except Exception as e:
             logging.error(f"❌ Error finding grant by name {grant_name}: {e}")
-            return None
-
-
-class GrantValidatorAgent:
-    """Agent 2: Validates and updates grant information in the table"""
-    
-    def __init__(self, gemini_api_key: str, jamai_client: JamAIBaseClient):
-        self.gemini_api_key = gemini_api_key
-        self.jamai_client = jamai_client
-        self.model = None
-        self.model_name = "gemini-2.0-flash"
-        self.configure_gemini()
-    
-    def configure_gemini(self):
-        """Configure Gemini AI for validation"""
-        try:
-            genai.configure(api_key=self.gemini_api_key)
-            self.model = genai.GenerativeModel(self.model_name)
-            logging.info(f"✅ GrantValidatorAgent initialized with {self.model_name}")
-        except Exception as e:
-            logging.error(f"❌ Gemini configuration failed for validator: {e}")
-            self.model = None
-
-    def validate_and_update_grants(self) -> Dict[str, Any]:
-        """
-        Validate all grants in scrap_result table and update if needed
-        """
-        if not self.model:
-            logging.error("❌ AI model not available for validation")
-            return {"success": False, "error": "AI model not available"}
-        
-        try:
-            # Step 1: Get all grants from scrap_result table using proper method
-            grants = self.jamai_client.get_grants_from_table()
-            if not grants:
-                logging.warning("⚠️ No grants found in table for validation")
-                return {"success": True, "grants_checked": 0, "grants_updated": 0}
-            
-            logging.info(f"🔍 Starting validation for {len(grants)} grants...")
-            
-            # Step 2: Validate each grant
-            updated_count = 0
-            for grant in grants:
-                try:
-                    if self._validate_and_update_single_grant(grant):
-                        updated_count += 1
-                    time.sleep(1)  # Small delay between validations
-                except Exception as e:
-                    logging.error(f"❌ Error validating grant {grant.get('id', 'unknown')}: {e}")
-                    continue
-            
-            logging.info(f"✅ Validation completed: {updated_count}/{len(grants)} grants updated")
-            return {
-                "success": True,
-                "grants_checked": len(grants),
-                "grants_updated": updated_count
-            }
-            
-        except Exception as e:
-            logging.error(f"❌ Grant validation failed: {e}")
-            return {"success": False, "error": str(e)}
-
-    def _validate_and_update_single_grant(self, grant: Dict) -> bool:
-        """Validate and update a single grant if needed"""
-        try:
-            grant_data = grant.get("grant_scrap", {})
-            grant_name = grant_data.get("grantName", {}).get("value", "Unknown Grant")
-            
-            # Check if grant_data is empty or missing critical information
-            if not grant_data or not grant_data.get("grantName", {}).get("value"):
-                logging.warning(f"⚠️ Grant {grant.get('id')} has incomplete data, skipping validation")
-                return False
-            
-            prompt = f"""
-            Analyze this grant data for accuracy and completeness:
-            
-            GRANT DATA:
-            {json.dumps(grant_data, indent=2)}
-            
-            TASK: Check if this grant information is:
-            1. ACCURATE - Information matches official sources
-            2. COMPLETE - No missing critical information
-            3. CURRENT - Information is up-to-date
-            
-            If you find any:
-            - Missing information
-            - Inaccurate details  
-            - Outdated information
-            - Broken URLs
-            
-            Return the CORRECTED and UPDATED grant data in the EXACT same JSON format.
-            
-            If the data is already accurate and complete, return the ORIGINAL data unchanged.
-            
-            RETURN ONLY THE JSON, no additional text.
-            """
-            
-            generation_config = {
-                "temperature": 0.1,  # Low temperature for consistency
-                "top_p": 0.9,
-                "top_k": 40,
-                "max_output_tokens": 2048,
-            }
-            
-            response = self._make_ai_request_with_retry(prompt, generation_config)
-            if not response:
-                return False
-            
-            # Parse the validated data
-            validated_data = self._parse_validated_response(response.text)
-            if not validated_data:
-                return False
-            
-            # Check if update is needed
-            if json.dumps(validated_data, sort_keys=True) != json.dumps(grant_data, sort_keys=True):
-                logging.info(f"🔄 Updating grant {grant_name} with validated data")
-                # Update the grant in the table using proper method
-                return self.jamai_client.update_grant_in_table(grant["id"], validated_data)
-            else:
-                logging.info(f"✅ Grant {grant_name} is already accurate, no update needed")
-            
-            return False
-            
-        except Exception as e:
-            logging.error(f"❌ Error validating grant {grant.get('id', 'unknown')}: {e}")
-            return False
-
-    def _make_ai_request_with_retry(self, prompt: str, generation_config: Dict, max_retries: int = 3) -> Optional[Any]:
-        """Make AI request with retry logic for quota issues"""
-        for attempt in range(max_retries):
-            try:
-                response = self.model.generate_content(
-                    prompt,
-                    generation_config=generation_config
-                )
-                return response
-            except Exception as e:
-                if "quota" in str(e).lower() or "429" in str(e):
-                    wait_time = (attempt + 1) * 30
-                    logging.warning(f"⚠️ Quota limit hit, waiting {wait_time} seconds...")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    logging.error(f"❌ AI request error: {e}")
-                    return None
-        logging.error("❌ All retries failed due to quota limits")
-        return None
-
-    def _parse_validated_response(self, response_text: str) -> Optional[Dict]:
-        """Parse the validation response"""
-        try:
-            cleaned_text = re.sub(r'```json\s*|\s*```', '', response_text).strip()
-            json_match = re.search(r'(\{.*\})', cleaned_text, re.DOTALL)
-            if json_match:
-                cleaned_text = json_match.group(1)
-            
-            return json.loads(cleaned_text)
-        except Exception as e:
-            logging.error(f"❌ Failed to parse validation response: {e}")
             return None
 
 
@@ -732,8 +588,7 @@ def cron_web_search() -> Dict[str, Any]:
     """
     Main cron job function to be scheduled
     - Scrapes Malaysian grants using reliable sequential system
-    - Adds them to JamAIBase scrap_result table
-    - Validates and updates existing grants
+    - Adds or updates them in JamAIBase scrap_result table
     """
     logging.basicConfig(
         level=logging.INFO,
@@ -760,54 +615,41 @@ def cron_web_search() -> Dict[str, Any]:
         # Initialize JamAIBase client first
         jamai_client = JamAIBaseClient()
         
-        # Initialize web scraper agent with jamai_client for duplicate detection
+        # Initialize web scraper agent with jamai_client
         web_scraper = WebScraperAgent(GEMINI_API_KEY, jamai_client)
         
-        # Initialize validator agent
-        validator_agent = GrantValidatorAgent(GEMINI_API_KEY, jamai_client)
-        
-        # Perform web search (now with duplicate detection)
+        # Perform web search
         logging.info("🚀 Starting web scraping for Malaysian grants...")
         grant_entries = web_scraper.scrape_all_grants()
         
         if grant_entries:
-            # Add grants to JamAIBase scrap_result table using proper method
-            logging.info("💾 Adding grants to JamAIBase scrap_result table...")
-            success = jamai_client.add_grant_entries_to_scrap_result_table(grant_entries)
+            # Add or update grants in JamAIBase scrap_result table
+            logging.info("💾 Processing grants in JamAIBase scrap_result table...")
+            result = jamai_client.add_or_update_grant_entries(grant_entries)
             
-            if success:
-                logging.info(f"✅ Successfully added {len(grant_entries)} grants to scrap_result table")
-                
-                # Wait a moment for data to be processed
-                time.sleep(2)
-                
-                # Step 2: Validate and update existing grants
-                logging.info("🔍 Starting grant validation process...")
-                validation_result = validator_agent.validate_and_update_grants()
+            if result["success"]:
+                logging.info(f"✅ Successfully processed {result['total_processed']} grants: {result['added']} added, {result['updated']} updated")
             else:
-                logging.error("❌ Failed to add grants to scrap_result table")
-                validation_result = {"success": False, "grants_checked": 0, "grants_updated": 0}
+                logging.error("❌ Failed to process grants in scrap_result table")
+                result = {"success": False, "added": 0, "updated": 0}
         else:
-            logging.warning("⚠️ No new grants found in web search")
-            success = True  # Consider it success if no new grants found
-            # Still validate existing grants
-            logging.info("🔍 Starting grant validation process for existing grants...")
-            validation_result = validator_agent.validate_and_update_grants()
+            logging.warning("⚠️ No grants found in web search")
+            result = {"success": True, "added": 0, "updated": 0}
         
-        # Prepare summary
+        # Prepare summary - maintaining the same structure
         summary = {
-            "success": success and validation_result["success"],
+            "success": result["success"],
             "grants_found": len(grant_entries),
-            "grants_checked": validation_result.get("grants_checked", 0),
-            "grants_updated": validation_result.get("grants_updated", 0),
+            "grants_added": result["added"],
+            "grants_updated": result["updated"],
             "timestamp": datetime.now(pytz.timezone('Asia/Kuala_Lumpur')).isoformat(),
             "project_id": JAMAIBASE_PROJECT_ID,
             "execution_time": "3am MYT Daily",
-            "method": "sequential_scraping_with_validation"
+            "method": "sequential_scraping_with_selective_updates"
         }
         
         if summary["success"]:
-            logging.info(f"📊 Cron job completed successfully: {len(grant_entries)} new grants, {validation_result.get('grants_updated', 0)} grants updated")
+            logging.info(f"📊 Cron job completed successfully: {result['added']} new grants added, {result['updated']} grants updated")
         else:
             logging.error("❌ Cron job completed with errors")
         
@@ -826,10 +668,10 @@ def setup_daily_cron():
     print("✅ Daily cron job scheduled:")
     print("   🕒 Time: 3:00 AM MYT (Asia/Kuala_Lumpur)")
     print("   🔄 Frequency: Every day")
-    print("   📝 Task: Scrape and validate Malaysian grants")
+    print("   📝 Task: Scrape Malaysian grants")
     print("   🎯 Table: scrap_result")
     print("   📊 Column: grant_scrap")
-    print("   🚫 Duplicate Prevention: ENABLED")
+    print("   🔄 Update Strategy: Replace existing grants, add new ones")
     print("\n🔄 Cron job is running... Press Ctrl+C to stop.")
     
     # Keep the script running
@@ -852,7 +694,7 @@ if __name__ == "__main__":
             
         elif command == "run-now":
             # Run the job immediately
-            print("🚀 Running Grant Scraping and Validation Immediately...")
+            print("🚀 Running Grant Scraping Immediately...")
             result = cron_web_search()
             print(f"📊 Result: {json.dumps(result, indent=2)}")
             
@@ -862,6 +704,6 @@ if __name__ == "__main__":
             print("  python web_scraper_agent.py cron     - Start daily cron scheduler")
     else:
         # Default: run immediately
-        print("🚀 Running Grant Scraping and Validation Immediately...")
+        print("🚀 Running Grant Scraping Immediately...")
         result = cron_web_search()
         print(f"📊 Result: {json.dumps(result, indent=2)}")
