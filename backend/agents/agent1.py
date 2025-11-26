@@ -46,9 +46,9 @@ class WebScraperAgent:
         try:
             genai.configure(api_key=self.gemini_api_key)
             self.model = genai.GenerativeModel(self.model_name)
-            logging.info(f"✅ WebScraperAgent initialized with {self.model_name}")
+            logging.info(f"WebScraperAgent initialized with {self.model_name}")
         except Exception as e:
-            logging.error(f"❌ Gemini configuration failed: {e}")
+            logging.error(f"Gemini configuration failed: {e}")
             self.model = None
 
     def scrape_all_grants(self) -> List[GrantEntry]:
@@ -56,20 +56,20 @@ class WebScraperAgent:
         Main method: Simple sequential scraping with limit to save quota
         """
         if not self.model:
-            logging.error("❌ AI model not available for web search")
+            logging.error("AI model not available for web search")
             return []
         
         try:
-            logging.info("🔍 Starting web search for Malaysian grants...")
+            logging.info("Starting web search for Malaysian grants...")
             
             # Step 1: Get comprehensive list of grant names (limited to save quota)
             grant_names = self._get_comprehensive_grant_list()
             
             if not grant_names:
-                logging.error("❌ No grant names found to scrape")
+                logging.error("No grant names found to scrape")
                 return []
             
-            logging.info(f"📋 Found {len(grant_names)} grants for processing")
+            logging.info(f"Found {len(grant_names)} grants for processing")
             
             # Step 2: Sequential scraping for all grants
             scraped_grants = self._sequential_scraping(grant_names)
@@ -77,11 +77,11 @@ class WebScraperAgent:
             # Step 3: Convert to grant entries
             grant_entries = self._create_grant_entries(scraped_grants)
             
-            logging.info(f"✅ Web search completed. Found {len(grant_entries)} grants")
+            logging.info(f"Web search completed. Found {len(grant_entries)} grants")
             return grant_entries
             
         except Exception as e:
-            logging.error(f"❌ Web search failed: {e}")
+            logging.error(f"Web search failed: {e}")
             return []
 
     def _get_comprehensive_grant_list(self) -> List[str]:
@@ -131,7 +131,7 @@ class WebScraperAgent:
             return grant_names[:10]
             
         except Exception as e:
-            logging.error(f"❌ Failed to get grant list: {e}")
+            logging.error(f"Failed to get grant list: {e}")
             return []
 
     def _sequential_scraping(self, grant_names: List[str]) -> List[Dict]:
@@ -139,29 +139,29 @@ class WebScraperAgent:
         scraped_grants = []
         total_grants = len(grant_names)
         
-        logging.info(f"🔄 Starting sequential scraping for {total_grants} grants...")
+        logging.info(f"Starting sequential scraping for {total_grants} grants...")
         
         for i, grant_name in enumerate(grant_names, 1):
             try:
-                logging.info(f"📝 Processing grant {i}/{total_grants}: {grant_name}")
+                logging.info(f"Processing grant {i}/{total_grants}: {grant_name}")
                 
                 # Scrape individual grant
                 grant_data = self._search_single_grant_ai(grant_name)
                 
                 if grant_data and self._validate_exact_structure(grant_data):
                     scraped_grants.append(grant_data)
-                    logging.info(f"✅ Successfully scraped: {grant_name}")
+                    logging.info(f"Successfully scraped: {grant_name}")
                 else:
-                    logging.warning(f"⚠️ Failed to scrape valid data for: {grant_name}")
+                    logging.warning(f"Failed to scrape valid data for: {grant_name}")
                 
                 # Add delay to avoid rate limiting
                 time.sleep(2)  # Reduced delay to 2 seconds
                 
             except Exception as e:
-                logging.error(f"❌ Error scraping {grant_name}: {e}")
+                logging.error(f"Error scraping {grant_name}: {e}")
                 continue
         
-        logging.info(f"📊 Sequential scraping completed: {len(scraped_grants)}/{total_grants} grants scraped")
+        logging.info(f"Sequential scraping completed: {len(scraped_grants)}/{total_grants} grants scraped")
         return scraped_grants
 
     def _search_single_grant_ai(self, grant_name: str) -> Optional[Dict[str, Any]]:
@@ -234,7 +234,7 @@ class WebScraperAgent:
             return grant_data
             
         except Exception as e:
-            logging.error(f"❌ Single grant search failed for {grant_name}: {e}")
+            logging.error(f"Single grant search failed for {grant_name}: {e}")
             return None
 
     def _make_ai_request_with_retry(self, prompt: str, generation_config: Dict, max_retries: int = 3) -> Optional[Any]:
@@ -249,13 +249,13 @@ class WebScraperAgent:
             except Exception as e:
                 if "quota" in str(e).lower() or "429" in str(e):
                     wait_time = (attempt + 1) * 30
-                    logging.warning(f"⚠️ Quota limit hit, waiting {wait_time} seconds...")
+                    logging.warning(f"Quota limit hit, waiting {wait_time} seconds...")
                     time.sleep(wait_time)
                     continue
                 else:
-                    logging.error(f"❌ AI request error: {e}")
+                    logging.error(f"AI request error: {e}")
                     return None
-        logging.error("❌ All retries failed due to quota limits")
+        logging.error("All retries failed due to quota limits")
         return None
 
     def _parse_grant_names_response(self, response_text: str) -> List[str]:
@@ -269,18 +269,18 @@ class WebScraperAgent:
             grant_names = json.loads(cleaned_text)
             
             if isinstance(grant_names, list) and all(isinstance(name, str) for name in grant_names):
-                logging.info(f"✅ Retrieved {len(grant_names)} grant names for processing")
+                logging.info(f"Retrieved {len(grant_names)} grant names for processing")
                 return grant_names
             else:
-                logging.error("❌ Invalid grant names format")
+                logging.error("Invalid grant names format")
                 return []
             
         except json.JSONDecodeError as e:
-            logging.error(f"❌ Failed to parse grant names as JSON: {e}")
-            logging.error(f"❌ Response text was: {response_text[:500]}...")
+            logging.error(f"Failed to parse grant names as JSON: {e}")
+            logging.error(f"Response text was: {response_text[:500]}...")
             return []
         except Exception as e:
-            logging.error(f"❌ Unexpected error parsing grant names: {e}")
+            logging.error(f"Unexpected error parsing grant names: {e}")
             return []
 
     def _parse_single_grant_response(self, response_text: str) -> Optional[Dict[str, Any]]:
@@ -296,14 +296,14 @@ class WebScraperAgent:
             if self._validate_exact_structure(grant_data):
                 return grant_data
             else:
-                logging.error("❌ Single grant response has invalid structure")
+                logging.error("Single grant response has invalid structure")
                 return None
             
         except json.JSONDecodeError as e:
-            logging.error(f"❌ Failed to parse single grant response as JSON: {e}")
+            logging.error(f"Failed to parse single grant response as JSON: {e}")
             return None
         except Exception as e:
-            logging.error(f"❌ Unexpected error parsing single grant: {e}")
+            logging.error(f"Unexpected error parsing single grant: {e}")
             return None
 
     def _validate_exact_structure(self, grant: Dict) -> bool:
@@ -378,7 +378,7 @@ class WebScraperAgent:
             )
             
             grant_entries.append(grant_entry)
-            logging.info(f"📝 Created grant entry: {entry_id} - {grant_data['grantName']['value']}")
+            logging.info(f"Created grant entry: {entry_id} - {grant_data['grantName']['value']}")
         
         return grant_entries
 
@@ -396,7 +396,7 @@ class JamAIBaseClient:
         Only deletes and replaces existing grants, keeps other grants intact
         """
         if not self.client:
-            logging.error("❌ JamAI client not initialized")
+            logging.error("JamAI client not initialized")
             return {"success": False, "added": 0, "updated": 0}
             
         try:
@@ -410,7 +410,7 @@ class JamAIBaseClient:
                 if grant_name:
                     existing_grant_map[grant_name.lower()] = grant
             
-            logging.info(f"📊 Found {len(existing_grant_map)} existing grants in table")
+            logging.info(f"Found {len(existing_grant_map)} existing grants in table")
             
             # Step 2: Identify which grants need to be updated vs added
             grants_to_delete = []  # Existing grants that need to be replaced
@@ -422,7 +422,7 @@ class JamAIBaseClient:
                 grant_name = grant_data.get("grantName", {}).get("value", "").strip()
                 
                 if not grant_name:
-                    logging.warning(f"⚠️ Skipping entry with empty grant name: {entry.id}")
+                    logging.warning(f"Skipping entry with empty grant name: {entry.id}")
                     continue
                 
                 if grant_name.lower() in existing_grant_map:
@@ -431,29 +431,29 @@ class JamAIBaseClient:
                     grants_to_delete.append(existing_grant["id"])
                     grants_to_add.append(entry)  # Add the new version
                     updated_count += 1
-                    logging.info(f"🔄 Will replace existing grant: {grant_name}")
+                    logging.info(f"Will replace existing grant: {grant_name}")
                 else:
                     # This is a new grant
                     grants_to_add.append(entry)
-                    logging.info(f"✅ Will add new grant: {grant_name}")
+                    logging.info(f"Will add new grant: {grant_name}")
             
             # Step 3: Delete only the existing grants that need to be replaced
             if grants_to_delete:
-                logging.info(f"🗑️ Deleting {len(grants_to_delete)} existing grants to be replaced...")
+                logging.info(f"Deleting {len(grants_to_delete)} existing grants to be replaced...")
                 delete_success = self._delete_specific_grants(grants_to_delete)
                 if not delete_success:
-                    logging.error("❌ Failed to delete existing grants")
+                    logging.error("Failed to delete existing grants")
                     return {"success": False, "added": 0, "updated": 0}
             else:
-                logging.info("📭 No existing grants to delete")
+                logging.info("No existing grants to delete")
             
             # Step 4: Add all new and updated grants
             added_count = 0
             if grants_to_add:
                 added_count = self._add_new_grants(grants_to_add)
-                logging.info(f"✅ Added {added_count} grants to table")
+                logging.info(f"Added {added_count} grants to table")
             
-            logging.info(f"📊 Grant processing completed: {added_count} added, {updated_count} grants updated")
+            logging.info(f"Grant processing completed: {added_count} added, {updated_count} grants updated")
             return {
                 "success": True,
                 "added": added_count,
@@ -462,17 +462,17 @@ class JamAIBaseClient:
             }
                         
         except Exception as e:
-            logging.error(f"❌ Error processing grants in JamAIBase: {e}")
+            logging.error(f"Error processing grants in JamAIBase: {e}")
             return {"success": False, "added": 0, "updated": 0}
 
     def _delete_specific_grants(self, grant_ids: List[str]) -> bool:
         """Delete specific grants from the table by their IDs"""
         try:
             if not grant_ids:
-                logging.info("📭 No grants to delete")
+                logging.info("No grants to delete")
                 return True
             
-            logging.info(f"🗑️ Deleting {len(grant_ids)} specific grants...")
+            logging.info(f"Deleting {len(grant_ids)} specific grants...")
             
             # Delete specific rows
             response = self.client.table.delete_table_rows(
@@ -484,14 +484,14 @@ class JamAIBaseClient:
             )
             
             if response.ok:
-                logging.info(f"✅ Successfully deleted {len(grant_ids)} grants")
+                logging.info(f"Successfully deleted {len(grant_ids)} grants")
                 return True
             else:
-                logging.error("❌ Failed to delete grants")
+                logging.error("Failed to delete grants")
                 return False
                 
         except Exception as e:
-            logging.error(f"❌ Error deleting specific grants: {e}")
+            logging.error(f"Error deleting specific grants: {e}")
             return False
 
     def _add_new_grants(self, grant_entries: List[GrantEntry]) -> int:
@@ -517,17 +517,17 @@ class JamAIBaseClient:
             )
             
             added_count = len(completion.rows)
-            logging.info(f"✅ Added {added_count} grants to table")
+            logging.info(f"Added {added_count} grants to table")
             return added_count
                         
         except Exception as e:
-            logging.error(f"❌ Error adding new grants: {e}")
+            logging.error(f"Error adding new grants: {e}")
             return 0
 
     def get_grants_from_table(self) -> List[Dict]:
         """Get all grants from scrap_result table using proper SDK method"""
         if not self.client:
-            logging.error("❌ JamAI client not initialized")
+            logging.error("JamAI client not initialized")
             return []
             
         try:
@@ -548,7 +548,7 @@ class JamAIBaseClient:
                     try:
                         grant_data = json.loads(grant_scrap_data)
                     except json.JSONDecodeError:
-                        logging.warning(f"⚠️ Failed to parse grant_scrap JSON for row {row.get('ID')}")
+                        logging.warning(f"Failed to parse grant_scrap JSON for row {row.get('ID')}")
                         grant_data = {}
                 else:
                     grant_data = {}
@@ -561,11 +561,11 @@ class JamAIBaseClient:
                 }
                 grants.append(grant_info)
             
-            logging.info(f"📋 Retrieved {len(grants)} grants from scrap_result table")
+            logging.info(f"Retrieved {len(grants)} grants from scrap_result table")
             return grants
             
         except Exception as e:
-            logging.error(f"❌ Error getting grants from table: {e}")
+            logging.error(f"Error getting grants from table: {e}")
             return []
 
     def find_grant_by_name(self, grant_name: str) -> Optional[Dict]:
@@ -579,7 +579,7 @@ class JamAIBaseClient:
                     return grant
             return None
         except Exception as e:
-            logging.error(f"❌ Error finding grant by name {grant_name}: {e}")
+            logging.error(f"Error finding grant by name {grant_name}: {e}")
             return None
 
 
@@ -600,15 +600,15 @@ def cron_web_search() -> Dict[str, Any]:
     )
     
     if not GEMINI_API_KEY:
-        logging.error("❌ GEMINI_API_KEY not found")
+        logging.error("GEMINI_API_KEY not found")
         return {"success": False, "error": "GEMINI_API_KEY not found"}
     
     if not os.getenv('JAMAIBASE_API_KEY'):
-        logging.error("❌ JAMAIBASE_API_KEY not found")
+        logging.error("JAMAIBASE_API_KEY not found")
         return {"success": False, "error": "JAMAIBASE_API_KEY not found"}
     
     if not JAMAIBASE_PROJECT_ID:
-        logging.error("❌ JAMAIBASE_PROJECT_ID not found")
+        logging.error("JAMAIBASE_PROJECT_ID not found")
         return {"success": False, "error": "JAMAIBASE_PROJECT_ID not found"}
     
     try:
@@ -619,21 +619,21 @@ def cron_web_search() -> Dict[str, Any]:
         web_scraper = WebScraperAgent(GEMINI_API_KEY, jamai_client)
         
         # Perform web search
-        logging.info("🚀 Starting web scraping for Malaysian grants...")
+        logging.info("Starting web scraping for Malaysian grants...")
         grant_entries = web_scraper.scrape_all_grants()
         
         if grant_entries:
             # Add or update grants in JamAIBase scrap_result table
-            logging.info("💾 Processing grants in JamAIBase scrap_result table...")
+            logging.info("Processing grants in JamAIBase scrap_result table...")
             result = jamai_client.add_or_update_grant_entries(grant_entries)
             
             if result["success"]:
-                logging.info(f"✅ Successfully processed {result['total_processed']} grants: {result['added']} added, {result['updated']} updated")
+                logging.info(f"Successfully processed {result['total_processed']} grants: {result['added']} added, {result['updated']} updated")
             else:
-                logging.error("❌ Failed to process grants in scrap_result table")
+                logging.error("Failed to process grants in scrap_result table")
                 result = {"success": False, "added": 0, "updated": 0}
         else:
-            logging.warning("⚠️ No grants found in web search")
+            logging.warning("No grants found in web search")
             result = {"success": True, "added": 0, "updated": 0}
         
         # Prepare summary - maintaining the same structure
@@ -649,14 +649,14 @@ def cron_web_search() -> Dict[str, Any]:
         }
         
         if summary["success"]:
-            logging.info(f"📊 Cron job completed successfully: {result['added']} new grants added, {result['updated']} grants updated")
+            logging.info(f"Cron job completed successfully: {result['added']} new grants added, {result['updated']} grants updated")
         else:
-            logging.error("❌ Cron job completed with errors")
+            logging.error("Cron job completed with errors")
         
         return summary
         
     except Exception as e:
-        logging.error(f"❌ Web scraping failed: {e}")
+        logging.error(f"Web scraping failed: {e}")
         return {"success": False, "error": str(e)}
 
 
@@ -665,14 +665,14 @@ def setup_daily_cron():
     # Schedule the job to run daily at 3am Malaysia Time
     schedule.every().day.at("03:00").do(cron_web_search)
     
-    print("✅ Daily cron job scheduled:")
-    print("   🕒 Time: 3:00 AM MYT (Asia/Kuala_Lumpur)")
-    print("   🔄 Frequency: Every day")
-    print("   📝 Task: Scrape Malaysian grants")
-    print("   🎯 Table: scrap_result")
-    print("   📊 Column: grant_scrap")
-    print("   🔄 Update Strategy: Replace existing grants, add new ones")
-    print("\n🔄 Cron job is running... Press Ctrl+C to stop.")
+    print("Daily cron job scheduled:")
+    print("   Time: 3:00 AM MYT (Asia/Kuala_Lumpur)")
+    print("   Frequency: Every day")
+    print("   Task: Scrape Malaysian grants")
+    print("   Table: scrap_result")
+    print("   Column: grant_scrap")
+    print("   Update Strategy: Replace existing grants, add new ones")
+    print("\nCron job is running... Press Ctrl+C to stop.")
     
     # Keep the script running
     while True:
@@ -689,14 +689,14 @@ if __name__ == "__main__":
         
         if command == "cron":
             # Start the cron job scheduler
-            print("🚀 Starting Daily Cron Job Scheduler...")
+            print("Starting Daily Cron Job Scheduler...")
             setup_daily_cron()
             
         elif command == "run-now":
             # Run the job immediately
-            print("🚀 Running Grant Scraping Immediately...")
+            print("Running Grant Scraping Immediately...")
             result = cron_web_search()
-            print(f"📊 Result: {json.dumps(result, indent=2)}")
+            print(f"Result: {json.dumps(result, indent=2)}")
             
         else:
             print("Usage:")
@@ -704,6 +704,6 @@ if __name__ == "__main__":
             print("  python web_scraper_agent.py cron     - Start daily cron scheduler")
     else:
         # Default: run immediately
-        print("🚀 Running Grant Scraping Immediately...")
+        print("Running Grant Scraping Immediately...")
         result = cron_web_search()
-        print(f"📊 Result: {json.dumps(result, indent=2)}")
+        print(f"Result: {json.dumps(result, indent=2)}")
