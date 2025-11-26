@@ -49,7 +49,7 @@ class ChatTableService:
                     "id": "AI", 
                     "dtype": "str",
                     "gen_config": {
-                        "model": "ellm/qwen/qwen3-30b-a3b-2507",
+                        "model": "gemini-1.5-flash",
                         "system_prompt": (
                             "You are a Routing Logic Engine for the MYGeranHub application.\n\n"
                             "**YOUR SOLE FUNCTION:**\n"
@@ -89,14 +89,14 @@ class ChatTableService:
         except Exception as e:
             print(f"Error ensuring agent: {e}")
 
-    def create_chat_table(self, session_id: str) -> Dict[str, Any]:
+    def create_chat_table(self, user_id: str) -> Dict[str, Any]:
         """
-        Creates a new Chat Table in JamAI Base for the given session, by duplicating the User_Chat_Agent.
+        Creates a new Chat Table in JamAI Base for the given user, by duplicating the User_Chat_Agent.
         """
         self.ensure_agent()
 
         # Table ID must be unique.
-        table_id = f"{self.agent_id}_{session_id}"
+        table_id = f"{self.agent_id}_{user_id}"
         
         # Use the duplicate endpoint to create a child table
         base_url, headers = self._ensure_configured()
@@ -125,11 +125,11 @@ class ChatTableService:
             print(f"Error creating chat table: {e}")
             raise
 
-    def send_message(self, session_id: str, message: str) -> str:
+    def send_message(self, user_id: str, message: str) -> str:
         """
         Sends a message to the chat table and returns the AI response.
         """
-        table_id = f"{self.agent_id}_{session_id}"
+        table_id = f"{self.agent_id}_{user_id}"
         base_url, headers = self._ensure_configured()
         url = f"{base_url}/gen_tables/chat/rows/add"
         
@@ -142,6 +142,14 @@ class ChatTableService:
         try:
             with httpx.Client() as client:
                 response = client.post(url, headers=headers, json=payload, timeout=60.0)
+                
+                # If table not found (404), try to create it and retry
+                if response.status_code == 404:
+                    print(f"Table {table_id} not found. Creating it...")
+                    self.create_chat_table(user_id)
+                    # Retry the request
+                    response = client.post(url, headers=headers, json=payload, timeout=60.0)
+
                 if response.status_code == 200:
                     data = response.json()
                     # Extract AI response from the first row
@@ -159,5 +167,91 @@ class ChatTableService:
         except Exception as e:
             print(f"Error sending message: {e}")
             raise
+
+    def run_scout_action(self, user_text: str) -> str:
+        """
+        Runs the Scout Action Table to determine follow-up questions or completion.
+        """
+        base_url, headers = self._ensure_configured()
+        url = f"{base_url}/gen_tables/action/rows/add"
+        
+        # Explicitly targeting the Action Table ID
+        # User confirmed the table name is "First_Grant"
+        table_id = "First_Grant"
+        
+        # User confirmed the column name is "Basic_Company_Profile"
+        payload = {
+            "table_id": table_id,
+            "data": [{"Basic_Company_Profile": user_text}],
+            "stream": False
+        }
+        
+        print(f"DEBUG: Sending to Action Table '{table_id}' with payload: {payload}")
+
+        try:
+            with httpx.Client() as client:
+                response = client.post(url, headers=headers, json=payload, timeout=60.0)
+                print(f"DEBUG: Action Table Response ({response.status_code}): {response.text}")
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    rows = data.get("rows", [])
+                    if rows:
+                        # Extract Follow_Up_Questions from the response
+                        cols = rows[0].get("columns", {})
+                        follow_up = cols.get("Follow_Up_Questions")
+                        if follow_up:
+                            # Handle both direct value or choices structure depending on API response
+                            if isinstance(follow_up, dict) and "choices" in follow_up:
+                                choices = follow_up.get("choices", [])
+                                if choices:
+                                    return choices[0].get("message", {}).get("content", "")
+                            elif isinstance(follow_up, dict) and "value" in follow_up:
+                                return str(follow_up.get("value", ""))
+                            elif isinstance(follow_up, str):
+                                return follow_up
+                            
+                    return "Error: No output from Scout Action."
+                else:
+                    print(f"Failed to run scout action. Status: {response.status_code}, Response: {response.text}")
+                    raise Exception(f"JamAI API Error: {response.text}")
+        except Exception as e:
+            print(f"Error running scout action: {e}")
+            raise
+
+    def handle_incoming_message(self, user_id: str, user_text: str) -> Dict[str, Any]:
+        """
+        Orchestrates the chat flow:
+        1. Sends message to Chat Table.
+        2. Checks for redirect token.
+        3. If redirect, calls Scout Action Table.
+        4. Returns appropriate response format.
+        """
+        # Step A: Call existing send_message (Chat Table)
+        chat_response = self.send_message(user_id, user_text)
+
+        # Step B: Check for redirect token
+        if "<<REDIRECT_TO_SEARCH>>" in chat_response:
+            # Do NOT return this text to user. Call Scout Action.
+            scout_output = self.run_scout_action(user_text)
+            
+            # Logic Gate
+            if "COMPLETE" in scout_output:
+                return {
+                    "status": "trigger_judge", 
+                    "payload": user_text
+                }
+            else:
+                # It's a question from the Scout
+                return {
+                    "status": "reply", 
+                    "message": [scout_output]
+                }
+        else:
+            # Normal Chat
+            return {
+                "status": "reply", 
+                "message": [chat_response]
+            }
 
 chat_table_service = ChatTableService()
