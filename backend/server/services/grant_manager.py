@@ -183,6 +183,24 @@ class GrantAgent:
                 )
             )
             
+            # DEBUG: Log full response
+            try:
+                with open("debug_jamai_response.log", "w", encoding="utf-8") as f:
+                    f.write(f"=== JamAI Response at {datetime.now()} ===\n")
+                    f.write(f"Input sent: {updated_buffer}\n")
+                    f.write(f"Completion type: {type(completion_1)}\n")
+                    f.write(f"Completion: {completion_1}\n")
+                    if completion_1.rows:
+                        row = completion_1.rows[0]
+                        f.write(f"\nRow type: {type(row)}\n")
+                        f.write(f"Row: {row}\n")
+                        f.write(f"\nColumns: {row.columns}\n")
+                        for col_name, col_val in row.columns.items():
+                            f.write(f"\n  {col_name}: {col_val}\n")
+                            f.write(f"    Type: {type(col_val)}\n")
+            except Exception as e:
+                print(f"Debug log error: {e}")
+            
             if not completion_1.rows:
                 return {"status": "ERROR", "reply": "No response from First Grant Agent."}
                 
@@ -205,6 +223,16 @@ class GrantAgent:
                     f.write(f"Checking Analysis: {analysis}\n")
             except:
                 pass
+            
+            # Handle NO_GRANTS_FOUND case
+            if "NO_GRANTS_FOUND" in analysis_upper:
+                print("DEBUG: No grants found. Returning no-match message.")
+                session_state["buffer"] = ""
+                return {
+                    "status": "DONE",
+                    "reply": "Based on your business profile, we couldn't find any matching grants at this time. This could be due to specific eligibility requirements or current availability. Please check back later or contact us for personalized assistance.",
+                    "updated_buffer": ""
+                }
             
             if "COMPLETE" in analysis_upper or "ANALYSIS_READY" in analysis_upper or "SUFFICIENT" in analysis_upper:
                 print("DEBUG: Analysis Complete. Triggering Final Grant.")

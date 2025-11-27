@@ -1,7 +1,7 @@
 # agents/web_scraper_agent.py
 import google.generativeai as genai
-from jamaibase import JamAI, types as t
-from typing import List, Dict, Any, Optional
+from jamaibase import JamAI, types as t  # type: ignore[import-not-found]
+from typing import Any, Dict, List, Optional, Set
 from dotenv import load_dotenv
 import json
 import re
@@ -9,18 +9,33 @@ import os
 from datetime import datetime
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import uuid
-import schedule
+import schedule  # type: ignore[import-not-found]
 import pytz
 
 # Load environment variables
+# Load environment variables
 load_dotenv()
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-JAMAIBASE_PROJECT_ID = os.getenv('JAMAIBASE_PROJECT_ID')
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# Support both the historical JAMAIBASE_* keys and the unified JAMAI_* keys
+JAMAIBASE_PROJECT_ID = (
+    os.getenv("JAMAI_SDK_PROJECT_ID")
+    or os.getenv("JAMAI_PROJECT_ID")
+    or os.getenv("JAMAIBASE_PROJECT_ID")
+)
+JAMAIBASE_API_KEY = (
+    os.getenv("JAMAI_SDK_TOKEN")
+    or os.getenv("JAMAI_API_KEY")
+    or os.getenv("JAMAIBASE_API_KEY")
+    or os.getenv("JAMAI_PAT")
+)
+SCRAP_TABLE_ID = os.getenv("JAMAI_SCRAP_RESULT_TABLE_ID", "scrap_result")
 
-# Initialize JamAI client globally
-jamai = JamAI(project_id=JAMAIBASE_PROJECT_ID, token=os.getenv('JAMAIBASE_API_KEY'))
+# Initialize JamAI client globally (fallback for CLI usage)
+jamai = None
+if JAMAIBASE_PROJECT_ID and JAMAIBASE_API_KEY:
+    jamai = JamAI(project_id=JAMAIBASE_PROJECT_ID, token=JAMAIBASE_API_KEY)
 
 @dataclass
 class GrantEntry:
@@ -30,15 +45,72 @@ class GrantEntry:
     updated_at: str
     status: str = "active"
 
+@dataclass
+class ScraperRunSummary:
+    """Structured summary for orchestrators and logs."""
+
+    success: bool
+    started_at: str
+    finished_at: str
+    grants_requested: int
+    grants_scraped: int
+    grants_added: int
+    grants_updated: int
+    processed_row_ids: List[str] = field(default_factory=list)
+    skipped_existing: List[str] = field(default_factory=list)
+    failed_grants: List[str] = field(default_factory=list)
+    errors: List[str] = field(default_factory=list)
+    project_id: Optional[str] = None
+    method: str = "sequential_scraping_with_selective_updates"
+
+    @property
+    def duration_seconds(self) -> float:
+        try:
+            start_dt = datetime.fromisoformat(self.started_at)
+            end_dt = datetime.fromisoformat(self.finished_at)
+            return max(0.0, (end_dt - start_dt).total_seconds())
+        except Exception:
+            return 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "success": self.success,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "timestamp": self.finished_at,
+            "duration_seconds": self.duration_seconds,
+            "grants_requested": self.grants_requested,
+            "grants_found": self.grants_requested,
+            "grants_scraped": self.grants_scraped,
+            "grants_added": self.grants_added,
+            "grants_updated": self.grants_updated,
+            "processed_row_ids": self.processed_row_ids,
+            "skipped_existing": self.skipped_existing,
+            "failed_grants": self.failed_grants,
+            "errors": self.errors,
+            "project_id": self.project_id,
+            "method": self.method,
+        }
+
+
+def _now_iso() -> str:
+    return datetime.now(pytz.timezone("Asia/Kuala_Lumpur")).isoformat()
+
+
 class WebScraperAgent:
     """Agent 1: Performs reliable sequential web scraping"""
     
-    def __init__(self, gemini_api_key: str, jamai_client):
+    def __init__(self, gemini_api_key: str, jamai_client, model_name: Optional[str] = None):
         self.gemini_api_key = gemini_api_key
         self.jamai_client = jamai_client
         self.model = None
-        self.model_name = "gemini-2.0-flash"
+        self.model_name = model_name or "gemini-2.0-flash"
         self.grant_entries: List[GrantEntry] = []
+        self.skipped_existing: List[str] = []
+        self.failed_grants: List[str] = []
+        self.processed_grant_names: List[str] = []
+        self.errors: List[str] = []
+        self.requested_grant_count: int = 0
         self.configure_gemini()
     
     def configure_gemini(self):
@@ -51,10 +123,23 @@ class WebScraperAgent:
             logging.error(f"❌ Gemini configuration failed: {e}")
             self.model = None
 
-    def scrape_all_grants(self) -> List[GrantEntry]:
+    def scrape_all_grants(
+        self,
+        existing_grant_names: Optional[Set[str]] = None,
+        max_candidates: Optional[int] = None,
+    ) -> List[GrantEntry]:
         """
-        Main method: Simple sequential scraping with limit to save quota
+        Main method: Simple sequential scraping with limit to save quota.
+        Optionally skips grants that are already present in the JamAI action table.
         """
+        # Reset run stats
+        self.grant_entries = []
+        self.skipped_existing = []
+        self.failed_grants = []
+        self.processed_grant_names = []
+        self.errors = []
+        self.requested_grant_count = 0
+
         if not self.model:
             logging.error("❌ AI model not available for web search")
             return []
@@ -63,12 +148,27 @@ class WebScraperAgent:
             logging.info("🔍 Starting web search for Malaysian grants...")
             
             # Step 1: Get comprehensive list of grant names (limited to save quota)
-            grant_names = self._get_comprehensive_grant_list()
+            grant_names = self._get_comprehensive_grant_list(max_candidates=max_candidates)
+            self.requested_grant_count = len(grant_names)
             
             if not grant_names:
                 logging.error("❌ No grant names found to scrape")
                 return []
             
+            if existing_grant_names:
+                filtered_names: List[str] = []
+                for grant_name in grant_names:
+                    normalized = grant_name.strip().lower()
+                    if normalized in existing_grant_names:
+                        self.skipped_existing.append(grant_name)
+                        continue
+                    filtered_names.append(grant_name)
+                grant_names = filtered_names
+
+            if not grant_names:
+                logging.info("📭 All grant names were skipped because they already exist in the table.")
+                return []
+
             logging.info(f"📋 Found {len(grant_names)} grants for processing")
             
             # Step 2: Sequential scraping for all grants
@@ -82,9 +182,10 @@ class WebScraperAgent:
             
         except Exception as e:
             logging.error(f"❌ Web search failed: {e}")
+            self.errors.append(str(e))
             return []
 
-    def _get_comprehensive_grant_list(self) -> List[str]:
+    def _get_comprehensive_grant_list(self, max_candidates: Optional[int] = None) -> List[str]:
         """Get a comprehensive list of Malaysian grant names with limit"""
         try:
             prompt = """
@@ -127,8 +228,8 @@ class WebScraperAgent:
                 return []
             
             grant_names = self._parse_grant_names_response(response.text)
-            # Limit to 10 grants to save quota while maintaining functionality
-            return grant_names[:10]
+            limit = max(1, min(max_candidates or 10, 25))
+            return grant_names[:limit]
             
         except Exception as e:
             logging.error(f"❌ Failed to get grant list: {e}")
@@ -150,8 +251,11 @@ class WebScraperAgent:
                 
                 if grant_data and self._validate_exact_structure(grant_data):
                     scraped_grants.append(grant_data)
+                    self.processed_grant_names.append(grant_name)
                     logging.info(f"✅ Successfully scraped: {grant_name}")
                 else:
+                    failure_reason = "invalid structure" if grant_data else "no data returned"
+                    self.failed_grants.append(f"{grant_name} - {failure_reason}")
                     logging.warning(f"⚠️ Failed to scrape valid data for: {grant_name}")
                 
                 # Add delay to avoid rate limiting
@@ -159,6 +263,7 @@ class WebScraperAgent:
                 
             except Exception as e:
                 logging.error(f"❌ Error scraping {grant_name}: {e}")
+                self.failed_grants.append(f"{grant_name} - exception: {e}")
                 continue
         
         logging.info(f"📊 Sequential scraping completed: {len(scraped_grants)}/{total_grants} grants scraped")
@@ -248,14 +353,16 @@ class WebScraperAgent:
                 return response
             except Exception as e:
                 if "quota" in str(e).lower() or "429" in str(e):
-                    wait_time = (attempt + 1) * 30
-                    logging.warning(f"⚠️ Quota limit hit, waiting {wait_time} seconds...")
+                    wait_time = min(120, 15 * (2 ** attempt))
+                    logging.warning(f"⚠️ Quota limit hit, waiting {wait_time} seconds... (attempt {attempt + 1})")
                     time.sleep(wait_time)
                     continue
                 else:
                     logging.error(f"❌ AI request error: {e}")
+                    self.errors.append(str(e))
                     return None
         logging.error("❌ All retries failed due to quota limits")
+        self.errors.append("quota limit reached")
         return None
 
     def _parse_grant_names_response(self, response_text: str) -> List[str]:
@@ -386,9 +493,19 @@ class WebScraperAgent:
 class JamAIBaseClient:
     """Client for interacting with JamAIBase API using proper SDK methods"""
     
-    def __init__(self):
-        # Use the globally initialized jamai client
-        self.client = jamai
+    def __init__(
+        self,
+        project_id: Optional[str] = None,
+        token: Optional[str] = None,
+        table_id: Optional[str] = None,
+    ):
+        pid = project_id or JAMAIBASE_PROJECT_ID
+        tok = token or JAMAIBASE_API_KEY
+        self.table_id = table_id or SCRAP_TABLE_ID
+        if pid and tok:
+            self.client = JamAI(project_id=pid, token=tok)
+        else:
+            self.client = jamai
     
     def add_or_update_grant_entries(self, grant_entries: List[GrantEntry]) -> Dict[str, Any]:
         """
@@ -397,7 +514,7 @@ class JamAIBaseClient:
         """
         if not self.client:
             logging.error("❌ JamAI client not initialized")
-            return {"success": False, "added": 0, "updated": 0}
+            return {"success": False, "added": 0, "updated": 0, "processed_ids": []}
             
         try:
             # Step 1: Get all existing grants
@@ -449,21 +566,25 @@ class JamAIBaseClient:
             
             # Step 4: Add all new and updated grants
             added_count = 0
+            processed_ids: List[str] = []
             if grants_to_add:
-                added_count = self._add_new_grants(grants_to_add)
+                add_result = self._add_new_grants(grants_to_add)
+                added_count = add_result["count"]
+                processed_ids = add_result["row_ids"]
                 logging.info(f"✅ Added {added_count} grants to table")
-            
+
             logging.info(f"📊 Grant processing completed: {added_count} added, {updated_count} grants updated")
             return {
                 "success": True,
                 "added": added_count,
                 "updated": updated_count,
-                "total_processed": added_count
+                "total_processed": added_count,
+                "processed_ids": processed_ids,
             }
                         
         except Exception as e:
             logging.error(f"❌ Error processing grants in JamAIBase: {e}")
-            return {"success": False, "added": 0, "updated": 0}
+            return {"success": False, "added": 0, "updated": 0, "processed_ids": []}
 
     def _delete_specific_grants(self, grant_ids: List[str]) -> bool:
         """Delete specific grants from the table by their IDs"""
@@ -478,7 +599,7 @@ class JamAIBaseClient:
             response = self.client.table.delete_table_rows(
                 "action",
                 t.RowDeleteRequest(
-                    table_id="scrap_result",
+                    table_id=self.table_id,
                     row_ids=grant_ids,
                 ),
             )
@@ -494,7 +615,7 @@ class JamAIBaseClient:
             logging.error(f"❌ Error deleting specific grants: {e}")
             return False
 
-    def _add_new_grants(self, grant_entries: List[GrantEntry]) -> int:
+    def _add_new_grants(self, grant_entries: List[GrantEntry]) -> Dict[str, Any]:
         """Add new grants to the table in batch"""
         try:
             rows_data = []
@@ -510,19 +631,20 @@ class JamAIBaseClient:
             completion = self.client.table.add_table_rows(
                 "action",
                 t.MultiRowAddRequest(
-                    table_id="scrap_result",
+                    table_id=self.table_id,
                     data=rows_data,
                     stream=False
                 ),
             )
             
-            added_count = len(completion.rows)
+            row_ids = self._extract_row_ids_from_completion(completion)
+            added_count = len(row_ids) or len(rows_data)
             logging.info(f"✅ Added {added_count} grants to table")
-            return added_count
+            return {"count": added_count, "row_ids": row_ids}
                         
         except Exception as e:
             logging.error(f"❌ Error adding new grants: {e}")
-            return 0
+            return {"count": 0, "row_ids": []}
 
     def get_grants_from_table(self) -> List[Dict]:
         """Get all grants from scrap_result table using proper SDK method"""
@@ -532,31 +654,21 @@ class JamAIBaseClient:
             
         try:
             # Use JamAIBase SDK method for listing rows - following documentation format
-            rows = self.client.table.list_table_rows("action", "scrap_result")
+            rows = self.client.table.list_table_rows("action", self.table_id)
             
             grants = []
+            items = getattr(rows, "items", None)
+            if not items and isinstance(rows, dict):
+                items = rows.get("items", [])
+
             # Paginated items - following documentation format
-            for row in rows.items:
-                # Handle different data types for grant_scrap
-                grant_scrap_data = row.get("grant_scrap", {})
-                
-                # If grant_scrap is already a dict, use it directly
-                if isinstance(grant_scrap_data, dict):
-                    grant_data = grant_scrap_data
-                # If grant_scrap is a string, try to parse it as JSON
-                elif isinstance(grant_scrap_data, str):
-                    try:
-                        grant_data = json.loads(grant_scrap_data)
-                    except json.JSONDecodeError:
-                        logging.warning(f"⚠️ Failed to parse grant_scrap JSON for row {row.get('ID')}")
-                        grant_data = {}
-                else:
-                    grant_data = {}
+            for row in items or []:
+                grant_scrap_data = self._parse_grant_scrap_cell(row.get("grant_scrap"))
                 
                 grant_info = {
-                    "id": row.get("ID"),
+                    "id": row.get("ID") or row.get("id") or row.get("row_id"),
                     "updated_at": row.get("updated_at", ""),
-                    "grant_scrap": grant_data,  # Always a dict for processing
+                    "grant_scrap": grant_scrap_data,
                     "status": row.get("status", "active")
                 }
                 grants.append(grant_info)
@@ -582,9 +694,153 @@ class JamAIBaseClient:
             logging.error(f"❌ Error finding grant by name {grant_name}: {e}")
             return None
 
+    def get_existing_grant_names(self) -> Set[str]:
+        """Return a set of normalized grant names already stored in the table."""
+        grant_names: Set[str] = set()
+        for grant in self.get_grants_from_table():
+            grant_data = grant.get("grant_scrap", {})
+            grant_name_node = grant_data.get("grantName") or {}
+            name = grant_name_node.get("value") if isinstance(grant_name_node, dict) else None
+            normalized = name.strip().lower() if isinstance(name, str) else ""
+            if normalized:
+                grant_names.add(normalized)
+        return grant_names
+
+    def _parse_grant_scrap_cell(self, cell: Any) -> Dict[str, Any]:
+        """Normalize JamAI cell payloads into the expected grant JSON dict."""
+        if isinstance(cell, dict):
+            if "grantName" in cell:
+                return cell
+            if "value" in cell:
+                value = cell.get("value")
+                if isinstance(value, str):
+                    try:
+                        return json.loads(value)
+                    except json.JSONDecodeError:
+                        logging.warning("⚠️ Failed to parse grant_scrap JSON string")
+                        return {}
+                if isinstance(value, dict):
+                    return value
+        if isinstance(cell, str):
+            try:
+                return json.loads(cell)
+            except json.JSONDecodeError:
+                logging.warning("⚠️ Failed to parse grant_scrap string")
+                return {}
+        return {}
+
+    def _extract_row_ids_from_completion(self, completion: Any) -> List[str]:
+        """Extract JamAI row IDs from add_table_rows responses."""
+        row_ids: List[str] = []
+        rows = getattr(completion, "rows", None)
+        if rows is None and isinstance(completion, dict):
+            rows = completion.get("rows")
+        for row in rows or []:
+            row_id = None
+            if isinstance(row, dict):
+                row_id = row.get("row_id") or row.get("id") or row.get("ID")
+            else:
+                row_id = getattr(row, "row_id", None) or getattr(row, "id", None)
+            if row_id:
+                row_ids.append(str(row_id))
+        return row_ids
+
+
+def run_scraper_job(
+    *,
+    gemini_api_key: Optional[str] = None,
+    jamai_project_id: Optional[str] = None,
+    jamai_token: Optional[str] = None,
+    scrap_table_id: Optional[str] = None,
+    skip_existing: bool = True,
+    max_candidates: Optional[int] = None,
+) -> ScraperRunSummary:
+    """Execute the scraping flow and return a structured summary."""
+    started_at = _now_iso()
+    gemini_key = gemini_api_key or GEMINI_API_KEY
+    jamai_project = jamai_project_id or JAMAIBASE_PROJECT_ID
+    jamai_key = jamai_token or JAMAIBASE_API_KEY
+    table_id = scrap_table_id or SCRAP_TABLE_ID
+
+    if not gemini_key:
+        errors = ["GEMINI_API_KEY not configured"]
+        return ScraperRunSummary(
+            success=False,
+            started_at=started_at,
+            finished_at=_now_iso(),
+            grants_requested=0,
+            grants_scraped=0,
+            grants_added=0,
+            grants_updated=0,
+            processed_row_ids=[],
+            skipped_existing=[],
+            failed_grants=[],
+            errors=errors,
+            project_id=jamai_project,
+        )
+
+    if not jamai_project or not jamai_key:
+        errors = ["JamAI credentials not configured"]
+        return ScraperRunSummary(
+            success=False,
+            started_at=started_at,
+            finished_at=_now_iso(),
+            grants_requested=0,
+            grants_scraped=0,
+            grants_added=0,
+            grants_updated=0,
+            processed_row_ids=[],
+            skipped_existing=[],
+            failed_grants=[],
+            errors=errors,
+            project_id=jamai_project,
+        )
+
+    jamai_client = JamAIBaseClient(
+        project_id=jamai_project,
+        token=jamai_key,
+        table_id=table_id,
+    )
+
+    web_scraper = WebScraperAgent(
+        gemini_key,
+        jamai_client,
+    )
+
+    existing_names = jamai_client.get_existing_grant_names() if skip_existing else None
+    grant_entries = web_scraper.scrape_all_grants(
+        existing_grant_names=existing_names,
+        max_candidates=max_candidates,
+    )
+
+    result = {"success": True, "added": 0, "updated": 0, "processed_ids": []}
+    if grant_entries:
+        result = jamai_client.add_or_update_grant_entries(grant_entries)
+
+    success = bool(result.get("success")) and not web_scraper.errors
+    errors = list(web_scraper.errors)
+    if not result.get("success"):
+        errors.append("Failed to persist grant entries to JamAI")
+
+    finished_at = _now_iso()
+    return ScraperRunSummary(
+        success=success,
+        started_at=started_at,
+        finished_at=finished_at,
+        grants_requested=web_scraper.requested_grant_count,
+        grants_scraped=len(web_scraper.processed_grant_names),
+        grants_added=result.get("added", 0),
+        grants_updated=result.get("updated", 0),
+        processed_row_ids=result.get("processed_ids", []),
+        skipped_existing=web_scraper.skipped_existing,
+        failed_grants=web_scraper.failed_grants,
+        errors=errors,
+        project_id=jamai_project,
+    )
+
 
 # Cron Job Execution Function
-def cron_web_search() -> Dict[str, Any]:
+def cron_web_search(skip_existing: bool = True, max_candidates: Optional[int] = None) -> Dict[str, Any]:
     """
     Main cron job function to be scheduled
     - Scrapes Malaysian grants using reliable sequential system
@@ -598,66 +854,20 @@ def cron_web_search() -> Dict[str, Any]:
             logging.StreamHandler()
         ]
     )
-    
-    if not GEMINI_API_KEY:
-        logging.error("❌ GEMINI_API_KEY not found")
-        return {"success": False, "error": "GEMINI_API_KEY not found"}
-    
-    if not os.getenv('JAMAIBASE_API_KEY'):
-        logging.error("❌ JAMAIBASE_API_KEY not found")
-        return {"success": False, "error": "JAMAIBASE_API_KEY not found"}
-    
-    if not JAMAIBASE_PROJECT_ID:
-        logging.error("❌ JAMAIBASE_PROJECT_ID not found")
-        return {"success": False, "error": "JAMAIBASE_PROJECT_ID not found"}
-    
-    try:
-        # Initialize JamAIBase client first
-        jamai_client = JamAIBaseClient()
-        
-        # Initialize web scraper agent with jamai_client
-        web_scraper = WebScraperAgent(GEMINI_API_KEY, jamai_client)
-        
-        # Perform web search
-        logging.info("🚀 Starting web scraping for Malaysian grants...")
-        grant_entries = web_scraper.scrape_all_grants()
-        
-        if grant_entries:
-            # Add or update grants in JamAIBase scrap_result table
-            logging.info("💾 Processing grants in JamAIBase scrap_result table...")
-            result = jamai_client.add_or_update_grant_entries(grant_entries)
-            
-            if result["success"]:
-                logging.info(f"✅ Successfully processed {result['total_processed']} grants: {result['added']} added, {result['updated']} updated")
-            else:
-                logging.error("❌ Failed to process grants in scrap_result table")
-                result = {"success": False, "added": 0, "updated": 0}
-        else:
-            logging.warning("⚠️ No grants found in web search")
-            result = {"success": True, "added": 0, "updated": 0}
-        
-        # Prepare summary - maintaining the same structure
-        summary = {
-            "success": result["success"],
-            "grants_found": len(grant_entries),
-            "grants_added": result["added"],
-            "grants_updated": result["updated"],
-            "timestamp": datetime.now(pytz.timezone('Asia/Kuala_Lumpur')).isoformat(),
-            "project_id": JAMAIBASE_PROJECT_ID,
-            "execution_time": "3am MYT Daily",
-            "method": "sequential_scraping_with_selective_updates"
-        }
-        
-        if summary["success"]:
-            logging.info(f"📊 Cron job completed successfully: {result['added']} new grants added, {result['updated']} grants updated")
-        else:
-            logging.error("❌ Cron job completed with errors")
-        
-        return summary
-        
-    except Exception as e:
-        logging.error(f"❌ Web scraping failed: {e}")
-        return {"success": False, "error": str(e)}
+    summary = run_scraper_job(
+        skip_existing=skip_existing,
+        max_candidates=max_candidates,
+    )
+
+    if summary.success:
+        logging.info(
+            "📊 Cron job completed successfully: %s added, %s updated",
+            summary.grants_added,
+            summary.grants_updated,
+        )
+    else:
+        logging.error("❌ Cron job completed with errors: %s", "; ".join(summary.errors) or "unknown error")
+    return summary.to_dict()
 
 
 def setup_daily_cron():

@@ -47,3 +47,5 @@ export function MessageBubble({ message, onContentUpdate }: MessageBubbleProps) 
     </div>
   )
 }
+
+
